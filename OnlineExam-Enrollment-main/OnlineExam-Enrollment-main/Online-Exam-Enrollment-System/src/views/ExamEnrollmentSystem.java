@@ -3,6 +3,7 @@ package views;
 import dao.DatabaseConnection;
 import java.awt.*;
 import java.sql.*;
+import dao.SchedulingService;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
@@ -15,16 +16,15 @@ public class ExamEnrollmentSystem extends JFrame {
     private JPanel mainContent;
     private JLabel lblName;
     private JLabel lblCourse;
-    private JLabel lblTotalPayment;
+    private JLabel lblBalance;
     private JTable tblUpcoming;
     private JTable tblHistory;
     private JTable tblManageExams;
 
-    private static final int EXAM_FEE = 300; // Updated to match database default
+    private static final int EXAM_FEE = 300; // Default exam fee
 
     public ExamEnrollmentSystem(int studentId) {
         this.studentId = studentId;
-        System.out.println("[DEBUG] ExamEnrollmentSystem: starting for studentId=" + studentId);
         initializeDb();
         initUI();
         loadStudentInfo();
@@ -92,13 +92,13 @@ public class ExamEnrollmentSystem extends JFrame {
         topBar.add(title, BorderLayout.WEST);
         add(topBar, BorderLayout.NORTH);
 
-        // Main content (dynamic)
+        // Main content
         mainContent = new JPanel(new CardLayout());
         add(mainContent, BorderLayout.CENTER);
 
         mainContent.add(createDashboardPanel(), "DASHBOARD");
         mainContent.add(createMyMarksPanel(), "MYMARKS");
-        mainContent.add(createManageExamsPanel(), "MANAGE");
+        mainContent.add(new ManageExamsPanel(studentId), "MANAGE");
 
         // Button actions
         btnDashboard.addActionListener(e -> showDashboardView());
@@ -126,26 +126,29 @@ public class ExamEnrollmentSystem extends JFrame {
         return b;
     }
 
+    // =================== DASHBOARD ===================
+
     private JPanel createDashboardPanel() {
         JPanel panel = new JPanel(null);
         panel.setBackground(new Color(245, 248, 255));
 
-        // Info card
-        JPanel cardPayment = createInfoCard("Total Payment", "₱0.00", 30, 20);
-        lblTotalPayment = new JLabel("₱0.00");
-        lblTotalPayment.setBounds(50, 60, 200, 30);
-        lblTotalPayment.setForeground(Color.WHITE);
-        lblTotalPayment.setFont(new Font("Arial", Font.BOLD, 18));
-        cardPayment.add(lblTotalPayment);
-        panel.add(cardPayment);
+        // Balance card
+        JPanel cardBalance = createInfoCard("Wallet Balance", "₱0.00", 30, 20);
+        lblBalance = new JLabel("₱0.00");
+        lblBalance.setBounds(50, 60, 200, 30);
+        lblBalance.setForeground(Color.WHITE);
+        lblBalance.setFont(new Font("Arial", Font.BOLD, 18));
+        cardBalance.add(lblBalance);
+        panel.add(cardBalance);
 
-        JButton btnPayNow = new JButton("Pay All");
-        btnPayNow.setBounds(340, 50, 100, 36);
-        btnPayNow.setBackground(new Color(34, 139, 34));
-        btnPayNow.setForeground(Color.WHITE);
-        btnPayNow.setFocusPainted(false);
-        btnPayNow.addActionListener(e -> openGenericPayment());
-        panel.add(btnPayNow);
+        // Cash-In button
+        JButton btnCashIn = new JButton("💰 Cash In");
+        btnCashIn.setBounds(340, 50, 120, 36);
+        btnCashIn.setBackground(new Color(34, 139, 34));
+        btnCashIn.setForeground(Color.WHITE);
+        btnCashIn.setFocusPainted(false);
+        btnCashIn.addActionListener(e -> openCashIn());
+        panel.add(btnCashIn);
 
         JLabel upLabel = new JLabel("Upcoming Exams");
         upLabel.setBounds(30, 150, 300, 25);
@@ -161,14 +164,9 @@ public class ExamEnrollmentSystem extends JFrame {
         btnRefreshUp.setBounds(750, 180, 120, 30);
         btnRefreshUp.addActionListener(e -> {
             loadUpcomingExams();
-            calculateTotalPayment();
+            loadBalance();
         });
         panel.add(btnRefreshUp);
-
-        JButton btnAction = new JButton("Action");
-        btnAction.setBounds(750, 220, 120, 30);
-        btnAction.addActionListener(e -> handleUpcomingAction());
-        panel.add(btnAction);
 
         JLabel histLabel = new JLabel("Recent History");
         histLabel.setBounds(30, 400, 300, 25);
@@ -195,70 +193,7 @@ public class ExamEnrollmentSystem extends JFrame {
         return card;
     }
 
-    private JPanel createMyMarksPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBackground(Color.WHITE);
-        
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        top.setBackground(Color.WHITE);
-        top.setBorder(new EmptyBorder(10, 10, 10, 10));
-        JLabel label = new JLabel("Completed Exams / My Marks");
-        label.setFont(new Font("Arial", Font.BOLD, 16));
-        top.add(label);
-        panel.add(top, BorderLayout.NORTH);
-
-        tblHistory = new JTable();
-        panel.add(new JScrollPane(tblHistory), BorderLayout.CENTER);
-        
-        return panel;
-    }
-
-    private JPanel createManageExamsPanel() {
-        JPanel panel = new JPanel(null);
-        panel.setBackground(Color.WHITE);
-
-        JLabel label = new JLabel("Available Exams for Your Course");
-        label.setFont(new Font("Arial", Font.BOLD, 14));
-        label.setBounds(20, 10, 400, 25);
-        panel.add(label);
-
-        tblManageExams = new JTable();
-        JScrollPane sp = new JScrollPane(tblManageExams);
-        sp.setBounds(20, 40, 700, 350);
-        panel.add(sp);
-
-        JButton btnRegister = new JButton("Register for Selected Exam");
-        btnRegister.setBounds(20, 410, 220, 30);
-        btnRegister.setBackground(new Color(30, 144, 255));
-        btnRegister.setForeground(Color.WHITE);
-        btnRegister.setFocusPainted(false);
-        btnRegister.addActionListener(e -> registerSelectedExam());
-        panel.add(btnRegister);
-
-        JButton btnRefresh = new JButton("Refresh");
-        btnRefresh.setBounds(260, 410, 100, 30);
-        btnRefresh.addActionListener(e -> loadManageExams());
-        panel.add(btnRefresh);
-
-        return panel;
-    }
-
-    private void showDashboardView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "DASHBOARD");
-        loadUpcomingExams();
-        loadExamHistory();
-        calculateTotalPayment();
-    }
-
-    private void showMyMarksView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "MYMARKS");
-        loadCompletedExams();
-    }
-
-    private void showManageView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "MANAGE");
-        loadManageExams();
-    }
+    // =================== LOADERS ===================
 
     private void loadStudentInfo() {
         try (PreparedStatement ps = conn.prepareStatement(
@@ -267,307 +202,133 @@ public class ExamEnrollmentSystem extends JFrame {
             ResultSet rs = ps.executeQuery();
             if (rs.next()) {
                 lblName.setText(rs.getString("name"));
-                String courseName = rs.getString("course_name");
-                lblCourse.setText(courseName != null ? courseName : "No Course");
-                System.out.println("[DEBUG] loadStudentInfo: name=" + rs.getString("name") + ", course=" + courseName);
-            } else {
-                System.out.println("[DEBUG] loadStudentInfo: no student row for id=" + studentId);
+                lblCourse.setText(rs.getString("course_name"));
             }
         } catch (SQLException ex) {
             ex.printStackTrace();
+        }
+    }
+
+    private void loadBalance() {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT balance FROM students WHERE id=?")) {
+            ps.setInt(1, studentId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                lblBalance.setText(String.format("₱%.2f", rs.getDouble("balance")));
+            }
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+            lblBalance.setText("₱0.00");
         }
     }
 
     private void loadUpcomingExams() {
         try {
-            String sql = "SELECT se.id AS reg_id, e.id AS exam_id, e.exam_name, e.exam_date, e.duration, se.is_paid, " +
-                    "es.scheduled_time, es.room_number " +
-                    "FROM student_exams se " +
-                    "JOIN exams e ON se.exam_id = e.id " +
-                    "LEFT JOIN exam_schedules es ON se.student_id = es.student_id AND se.exam_id = es.exam_id " +
-                    "WHERE se.student_id = ? AND e.exam_date >= CURDATE() ORDER BY e.exam_date";
+            // First auto-schedule any enrolled exams missing schedule info
+            try (PreparedStatement uns = conn.prepareStatement(
+                    "SELECT exam_id FROM student_exams WHERE student_id=? AND status IN ('Pending','Enrolled') AND scheduled_date IS NULL")) {
+                uns.setInt(1, studentId);
+                try (ResultSet ur = uns.executeQuery()) {
+                    while (ur.next()) {
+                        SchedulingService.autoScheduleExam(studentId, ur.getInt(1));
+                    }
+                }
+            }
+
+            String sql = "SELECT se.id AS reg_id, e.id AS exam_id, e.exam_name, "
+                    + "COALESCE(se.scheduled_date, e.exam_date) AS display_date, "
+                    + "COALESCE(se.scheduled_time, e.exam_time) AS display_time, "
+                    + "COALESCE(se.room, e.room) AS room, e.duration, se.status, se.is_paid "
+                    + "FROM student_exams se JOIN exams e ON se.exam_id = e.id "
+                    + "WHERE se.student_id=? AND se.status <> 'Cancelled' "
+                    + "ORDER BY display_date, display_time";
             PreparedStatement ps = conn.prepareStatement(sql);
             ps.setInt(1, studentId);
             ResultSet rs = ps.executeQuery();
 
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "RegID", "ExamID", "Exam", "Date", "Time", "Room", "Paid" }, 0);
+                    new Object[] { "RegID", "ExamID", "Exam", "Date", "Time", "Room", "Duration", "Status", "Paid" },
+                    0);
             int rows = 0;
             while (rs.next()) {
                 int regId = rs.getInt("reg_id");
                 int examId = rs.getInt("exam_id");
-                String name = rs.getString("exam_name");
-                Date d = rs.getDate("exam_date");
-                Time time = rs.getTime("scheduled_time");
-                String room = rs.getString("room_number");
+                String examName = rs.getString("exam_name");
+                Date displayDate = rs.getDate("display_date");
+                Time displayTime = rs.getTime("display_time");
+                String room = rs.getString("room");
+                String duration = rs.getString("duration");
+                String status = rs.getString("status");
                 boolean paid = rs.getInt("is_paid") == 1;
 
                 model.addRow(new Object[] {
                         regId,
                         examId,
-                        name,
-                        d,
-                        time != null ? time.toString() : "TBA",
+                        examName,
+                        displayDate,
+                        displayTime != null ? displayTime.toString() : "TBA",
                         room != null ? room : "TBA",
+                        duration != null ? duration : "TBA",
+                        status != null ? status : "Unknown",
                         paid ? "Paid" : "Unpaid"
                 });
                 rows++;
             }
+
             tblUpcoming.setModel(model);
-            System.out.println("[DEBUG] loadUpcomingExams: rows returned=" + rows + " for studentId=" + studentId);
-            
-            // Hide RegID and ExamID columns
+            // hide ID columns but keep them in model for actions
             if (tblUpcoming.getColumnModel().getColumnCount() > 0) {
                 tblUpcoming.removeColumn(tblUpcoming.getColumnModel().getColumn(0));
-                tblUpcoming.removeColumn(tblUpcoming.getColumnModel().getColumn(0));
+                if (tblUpcoming.getColumnModel().getColumnCount() > 0) {
+                    tblUpcoming.removeColumn(tblUpcoming.getColumnModel().getColumn(0));
+                }
             }
+            System.out.println("[DEBUG] loadUpcomingExams: rows returned=" + rows + " for studentId=" + studentId);
         } catch (SQLException ex) {
             ex.printStackTrace();
         }
     }
 
-    private void loadExamHistory() {
-        try {
-            String sql = "SELECT e.exam_name, e.exam_date, se.status, se.is_paid " +
-                    "FROM student_exams se JOIN exams e ON se.exam_id = e.id " +
-                    "WHERE se.student_id = ? ORDER BY e.exam_date DESC LIMIT 5";
-            PreparedStatement ps = conn.prepareStatement(sql);
+    private JPanel createMyMarksPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(Color.WHITE);
+        JLabel label = new JLabel("Completed Exams / My Marks");
+        label.setFont(new Font("Arial", Font.BOLD, 16));
+        panel.add(label, BorderLayout.NORTH);
+        tblHistory = new JTable();
+        panel.add(new JScrollPane(tblHistory), BorderLayout.CENTER);
+        return panel;
+    }
+
+    // =================== BUTTON LOGIC ===================
+
+    private void openCashIn() {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT name FROM students WHERE id=?")) {
             ps.setInt(1, studentId);
             ResultSet rs = ps.executeQuery();
-
-            DefaultTableModel model = new DefaultTableModel(new Object[] { "Exam", "Date", "Status", "Paid" }, 0);
-            while (rs.next()) {
-                String name = rs.getString("exam_name");
-                Date d = rs.getDate("exam_date");
-                String status = rs.getString("status");
-                boolean paid = rs.getInt("is_paid") == 1;
-                model.addRow(new Object[] { name, d, status, paid ? "Paid" : "Unpaid" });
-            }
-            tblHistory.setModel(model);
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
-    }
-
-    private void loadCompletedExams() {
-        try {
-            String sql = "SELECT e.exam_name, e.exam_date, se.status, se.is_paid " +
-                    "FROM student_exams se JOIN exams e ON se.exam_id = e.id " +
-                    "WHERE se.student_id = ? AND se.status = 'Completed' ORDER BY e.exam_date DESC";
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setInt(1, studentId);
-            ResultSet rs = ps.executeQuery();
-
-            int rows = 0;
-            DefaultTableModel model = new DefaultTableModel(new Object[] { "Exam", "Date", "Status", "Paid" }, 0);
-            while (rs.next()) {
-                String name = rs.getString("exam_name");
-                Date d = rs.getDate("exam_date");
-                String status = rs.getString("status");
-                boolean paid = rs.getInt("is_paid") == 1;
-                model.addRow(new Object[] { name, d, status, paid ? "Paid" : "Unpaid" });
-                rows++;
-            }
-            tblHistory.setModel(model);
-            System.out.println("[DEBUG] loadCompletedExams: rows returned=" + rows + " for studentId=" + studentId);
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
-    }
-
-    private void loadManageExams() {
-        try {
-            int courseId = 0;
-            PreparedStatement p1 = conn.prepareStatement("SELECT course_id FROM students WHERE id = ?");
-            p1.setInt(1, studentId);
-            ResultSet r1 = p1.executeQuery();
-            if (r1.next())
-                courseId = r1.getInt("course_id");
-
-            String sql = "SELECT e.id, e.exam_name, e.exam_date, e.duration, " +
-                    "IF(EXISTS(SELECT 1 FROM student_exams se WHERE se.student_id=? AND se.exam_id=e.id), 'Registered','Not Registered') AS regstatus "
-                    +
-                    "FROM exams e WHERE e.course_id = ? ORDER BY e.exam_date";
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setInt(1, studentId);
-            ps.setInt(2, courseId);
-            ResultSet rs = ps.executeQuery();
-
-            DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "ExamID", "Exam", "Date", "Duration", "Status" }, 0);
-            while (rs.next()) {
-                int id = rs.getInt("id");
-                String name = rs.getString("exam_name");
-                Date d = rs.getDate("exam_date");
-                String dur = rs.getString("duration");
-                String st = rs.getString("regstatus");
-                model.addRow(new Object[] { id, name, d, dur, st });
-            }
-            tblManageExams.setModel(model);
-            
-            // Hide ExamID column
-            if (tblManageExams.getColumnModel().getColumnCount() > 0) {
-                tblManageExams.removeColumn(tblManageExams.getColumnModel().getColumn(0));
-            }
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
-    }
-
-    private void calculateTotalPayment() {
-        try {
-            String q = "SELECT COUNT(*) FROM student_exams WHERE student_id = ? AND is_paid = 1";
-            PreparedStatement p = conn.prepareStatement(q);
-            p.setInt(1, studentId);
-            ResultSet r = p.executeQuery();
-            int countPaid = 0;
-            if (r.next())
-                countPaid = r.getInt(1);
-            int total = countPaid * EXAM_FEE;
-            lblTotalPayment.setText("₱" + total + ".00");
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-            lblTotalPayment.setText("₱0.00");
-        }
-    }
-
-    private void handleUpcomingAction() {
-        int row = tblUpcoming.getSelectedRow();
-        if (row == -1) {
-            JOptionPane.showMessageDialog(this, "Select an upcoming exam first.", "Info",
-                    JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-
-        DefaultTableModel m = (DefaultTableModel) tblUpcoming.getModel();
-        int modelRow = tblUpcoming.convertRowIndexToModel(row);
-
-        // Get hidden columns (RegID and ExamID are at indices 0 and 1 in model)
-        int regId = (int) m.getValueAt(modelRow, 0);
-        int examId = (int) m.getValueAt(modelRow, 1);
-        String examName = (String) m.getValueAt(modelRow, 2);
-        Date examDate = (Date) m.getValueAt(modelRow, 3);
-        String paidStatus = (String) m.getValueAt(modelRow, 6);
-
-        if ("Unpaid".equalsIgnoreCase(paidStatus)) {
-            // Open payment form - CORRECTED constructor call
-            PaymentForm pf = new PaymentForm(this, studentId, regId, examId, examName, EXAM_FEE);
-            pf.setVisible(true);
-        } else {
-            int confirm = JOptionPane.showConfirmDialog(this,
-                    "Start exam \"" + examName + "\" now?",
-                    "Start Exam",
-                    JOptionPane.YES_NO_OPTION);
-            if (confirm == JOptionPane.YES_OPTION) {
-                JOptionPane.showMessageDialog(this,
-                        "Good luck! (Exam start simulated)",
-                        "Exam Started",
-                        JOptionPane.INFORMATION_MESSAGE);
-            }
-        }
-
-        loadUpcomingExams();
-        loadExamHistory();
-        calculateTotalPayment();
-    }
-
-    private void registerSelectedExam() {
-        int row = tblManageExams.getSelectedRow();
-        if (row == -1) {
-            JOptionPane.showMessageDialog(this, "Select an exam to register.", "Info", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        
-        DefaultTableModel m = (DefaultTableModel) tblManageExams.getModel();
-        int modelRow = tblManageExams.convertRowIndexToModel(row);
-        String status = (String) m.getValueAt(modelRow, 4);
-        String examName = (String) m.getValueAt(modelRow, 1);
-        Date examDate = (Date) m.getValueAt(modelRow, 2);
-
-        if ("Registered".equalsIgnoreCase(status)) {
-            JOptionPane.showMessageDialog(this, "You already registered for this exam.", "Info",
-                    JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        
-        try {
-            PreparedStatement ps = conn
-                    .prepareStatement("SELECT id FROM exams WHERE exam_name=? AND exam_date=? LIMIT 1");
-            ps.setString(1, examName);
-            ps.setDate(2, examDate);
-            ResultSet rs = ps.executeQuery();
-            
             if (rs.next()) {
-                int examId = rs.getInt("id");
-                
-                PreparedStatement chk = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM student_exams WHERE student_id=? AND exam_id=?");
-                chk.setInt(1, studentId);
-                chk.setInt(2, examId);
-                ResultSet r2 = chk.executeQuery();
-                
-                if (r2.next() && r2.getInt(1) > 0) {
-                    JOptionPane.showMessageDialog(this, "Already registered.", "Info", JOptionPane.INFORMATION_MESSAGE);
-                    loadManageExams();
-                    return;
-                }
-                
-                PreparedStatement ins = conn.prepareStatement(
-                        "INSERT INTO student_exams (student_id, exam_id, status, is_paid) VALUES (?, ?, 'Pending', 0)");
-                ins.setInt(1, studentId);
-                ins.setInt(2, examId);
-                int c = ins.executeUpdate();
-                
-                if (c > 0) {
-                    JOptionPane.showMessageDialog(this, 
-                            "Registered successfully!\n\nPlease proceed to payment to confirm your enrollment.",
-                            "Success", 
-                            JOptionPane.INFORMATION_MESSAGE);
-                } else {
-                    JOptionPane.showMessageDialog(this, "Registration failed.", "Error", JOptionPane.ERROR_MESSAGE);
-                }
-            } else {
-                JOptionPane.showMessageDialog(this, "Exam not found.", "Error", JOptionPane.ERROR_MESSAGE);
+                String name = rs.getString("name");
+                PaymentForm pf = new PaymentForm(this, studentId, name, 0);
+                pf.setVisible(true);
+                loadBalance();
             }
         } catch (SQLException ex) {
             ex.printStackTrace();
-            JOptionPane.showMessageDialog(this, "Error registering: " + ex.getMessage(), "Error",
-                    JOptionPane.ERROR_MESSAGE);
         }
-        
-        loadManageExams();
+    }
+
+    private void showDashboardView() {
+        ((CardLayout) mainContent.getLayout()).show(mainContent, "DASHBOARD");
+        loadBalance();
         loadUpcomingExams();
     }
 
-    private void openGenericPayment() {
-        try {
-            PreparedStatement ps = conn.prepareStatement(
-                    "SELECT COUNT(*) FROM student_exams WHERE student_id = ? AND is_paid = 0");
-            ps.setInt(1, studentId);
-            ResultSet rs = ps.executeQuery();
-            int unpaidCount = 0;
-            if (rs.next())
-                unpaidCount = rs.getInt(1);
+    private void showMyMarksView() {
+        ((CardLayout) mainContent.getLayout()).show(mainContent, "MYMARKS");
+    }
 
-            if (unpaidCount == 0) {
-                JOptionPane.showMessageDialog(this, "You have no outstanding payments.", "Info",
-                        JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
-
-            double total = unpaidCount * EXAM_FEE;
-
-            // Use the PaymentForm for "Pay All" - CORRECTED constructor
-            PaymentForm pf = new PaymentForm(this, studentId, unpaidCount, total);
-            pf.setVisible(true);
-
-            loadUpcomingExams();
-            loadExamHistory();
-            calculateTotalPayment();
-
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
+    private void showManageView() {
+        ((CardLayout) mainContent.getLayout()).show(mainContent, "MANAGE");
     }
 
     public static void main(String[] args) {

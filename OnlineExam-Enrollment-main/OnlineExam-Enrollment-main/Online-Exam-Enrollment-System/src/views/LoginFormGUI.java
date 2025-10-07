@@ -94,8 +94,8 @@ public class LoginFormGUI extends JFrame {
         String password = new String(passwordField.getPassword());
 
         if (email.isEmpty() || password.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Please enter both email and password.", 
-                "Validation Error", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Please enter both email and password.",
+                    "Validation Error", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
@@ -103,13 +103,13 @@ public class LoginFormGUI extends JFrame {
         Student student = studentDAO.loginStudent(email, password);
 
         if (student != null) {
-            JOptionPane.showMessageDialog(this, "Login successful! Welcome, " + student.getName(), 
-                "Success", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Login successful! Welcome, " + student.getName(),
+                    "Success", JOptionPane.INFORMATION_MESSAGE);
             dispose();
             new ExamEnrollmentSystem(student.getId()).setVisible(true);
         } else {
-            JOptionPane.showMessageDialog(this, "Invalid email or password.", 
-                "Login Failed", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Invalid email or password.",
+                    "Login Failed", JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -126,28 +126,32 @@ public class LoginFormGUI extends JFrame {
         gbc.fill = GridBagConstraints.HORIZONTAL;
 
         // Name
-        gbc.gridx = 0; gbc.gridy = 0;
+        gbc.gridx = 0;
+        gbc.gridy = 0;
         formPanel.add(new JLabel("Full Name:"), gbc);
         gbc.gridx = 1;
         JTextField nameField = new JTextField(20);
         formPanel.add(nameField, gbc);
 
         // Email
-        gbc.gridx = 0; gbc.gridy = 1;
+        gbc.gridx = 0;
+        gbc.gridy = 1;
         formPanel.add(new JLabel("Email:"), gbc);
         gbc.gridx = 1;
         JTextField regEmailField = new JTextField(20);
         formPanel.add(regEmailField, gbc);
 
         // Password
-        gbc.gridx = 0; gbc.gridy = 2;
+        gbc.gridx = 0;
+        gbc.gridy = 2;
         formPanel.add(new JLabel("Password:"), gbc);
         gbc.gridx = 1;
         JPasswordField regPasswordField = new JPasswordField(20);
         formPanel.add(regPasswordField, gbc);
 
         // Course
-        gbc.gridx = 0; gbc.gridy = 3;
+        gbc.gridx = 0;
+        gbc.gridy = 3;
         formPanel.add(new JLabel("Course:"), gbc);
         gbc.gridx = 1;
         JComboBox<Course> courseCombo = new JComboBox<>();
@@ -159,7 +163,9 @@ public class LoginFormGUI extends JFrame {
         formPanel.add(courseCombo, gbc);
 
         // Register button
-        gbc.gridx = 0; gbc.gridy = 4; gbc.gridwidth = 2;
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        gbc.gridwidth = 2;
         JButton submitButton = new JButton("Register");
         submitButton.setBackground(new Color(34, 139, 34));
         submitButton.setForeground(Color.WHITE);
@@ -170,33 +176,26 @@ public class LoginFormGUI extends JFrame {
             Course selectedCourse = (Course) courseCombo.getSelectedItem();
 
             if (name.isEmpty() || email.isEmpty() || password.isEmpty() || selectedCourse == null) {
-                JOptionPane.showMessageDialog(registerDialog, "Please fill all fields.", 
-                    "Validation Error", JOptionPane.WARNING_MESSAGE);
+                JOptionPane.showMessageDialog(registerDialog, "Please fill all fields.",
+                        "Validation Error", JOptionPane.WARNING_MESSAGE);
                 return;
             }
 
             Student newStudent = new Student(name, email, password, selectedCourse.getId());
             StudentDAO dao = new StudentDAO();
-            
+
             if (dao.registerStudent(newStudent)) {
-                JOptionPane.showMessageDialog(registerDialog, "Registration successful! You can now login.", 
-                    "Success", JOptionPane.INFORMATION_MESSAGE);
+                JOptionPane.showMessageDialog(registerDialog, "Registration successful! You can now login.",
+                        "Success", JOptionPane.INFORMATION_MESSAGE);
                 registerDialog.dispose();
             } else {
-                JOptionPane.showMessageDialog(registerDialog, "Registration failed. Email may already exist.", 
-                    "Error", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(registerDialog, "Registration failed. Email may already exist.",
+                        "Error", JOptionPane.ERROR_MESSAGE);
             }
         });
         formPanel.add(submitButton, gbc);
 
         registerDialog.add(formPanel, BorderLayout.CENTER);
         registerDialog.setVisible(true);
-    }
-
-    public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> {
-            LoginFormGUI login = new LoginFormGUI();
-            login.setVisible(true);
-        });
     }
 }
