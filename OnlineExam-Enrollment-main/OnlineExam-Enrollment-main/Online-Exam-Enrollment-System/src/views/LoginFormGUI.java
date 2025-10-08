@@ -1,11 +1,13 @@
 package views;
 
+import dao.AdminDAO;
 import dao.CourseDAO;
 import dao.StudentDAO;
 import java.awt.*;
 import java.util.List;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import models.Admin;
 import models.Course;
 import models.Student;
 
@@ -13,7 +15,8 @@ public class LoginFormGUI extends JFrame {
 
     private JTextField emailField;
     private JPasswordField passwordField;
-    private JButton loginButton, registerButton;
+    private JButton loginButton, registerButton, adminLoginButton;
+    private JCheckBox adminCheckbox;
 
     public LoginFormGUI() {
         initUI();
@@ -21,7 +24,7 @@ public class LoginFormGUI extends JFrame {
 
     private void initUI() {
         setTitle("Exam Enrollment System - Login");
-        setSize(450, 350);
+        setSize(450, 400);
         setLocationRelativeTo(null);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
@@ -40,7 +43,7 @@ public class LoginFormGUI extends JFrame {
         mainPanel.add(Box.createVerticalStrut(30));
 
         // Email field
-        JLabel emailLabel = new JLabel("Email:");
+        JLabel emailLabel = new JLabel("Email/Username:");
         emailLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         mainPanel.add(emailLabel);
         mainPanel.add(Box.createVerticalStrut(5));
@@ -61,7 +64,15 @@ public class LoginFormGUI extends JFrame {
         passwordField.setMaximumSize(new Dimension(300, 30));
         passwordField.setAlignmentX(Component.CENTER_ALIGNMENT);
         mainPanel.add(passwordField);
-        mainPanel.add(Box.createVerticalStrut(25));
+        mainPanel.add(Box.createVerticalStrut(15));
+
+        // Admin checkbox
+        adminCheckbox = new JCheckBox("Login as Administrator");
+        adminCheckbox.setAlignmentX(Component.CENTER_ALIGNMENT);
+        adminCheckbox.setBackground(Color.WHITE);
+        adminCheckbox.setFont(new Font("Arial", Font.PLAIN, 12));
+        mainPanel.add(adminCheckbox);
+        mainPanel.add(Box.createVerticalStrut(20));
 
         // Login button
         loginButton = new JButton("Login");
@@ -71,45 +82,65 @@ public class LoginFormGUI extends JFrame {
         loginButton.setFocusPainted(false);
         loginButton.setPreferredSize(new Dimension(300, 35));
         loginButton.setMaximumSize(new Dimension(300, 35));
-        loginButton.addActionListener(e -> handleLogin());
+        loginButton.addActionListener(event -> handleLogin());
         mainPanel.add(loginButton);
         mainPanel.add(Box.createVerticalStrut(10));
 
         // Register button
-        registerButton = new JButton("Register New Account");
+        registerButton = new JButton("Register New Student Account");
         registerButton.setAlignmentX(Component.CENTER_ALIGNMENT);
         registerButton.setBackground(new Color(34, 139, 34));
         registerButton.setForeground(Color.WHITE);
         registerButton.setFocusPainted(false);
         registerButton.setPreferredSize(new Dimension(300, 35));
         registerButton.setMaximumSize(new Dimension(300, 35));
-        registerButton.addActionListener(e -> openRegisterDialog());
+        registerButton.addActionListener(event -> openRegisterDialog());
         mainPanel.add(registerButton);
 
         add(mainPanel, BorderLayout.CENTER);
     }
 
     private void handleLogin() {
-        String email = emailField.getText().trim();
+        String emailOrUsername = emailField.getText().trim();
         String password = new String(passwordField.getPassword());
 
-        if (email.isEmpty() || password.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Please enter both email and password.",
+        if (emailOrUsername.isEmpty() || password.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Please enter both email/username and password.",
                     "Validation Error", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
-        StudentDAO studentDAO = new StudentDAO();
-        Student student = studentDAO.loginStudent(email, password);
+        if (adminCheckbox.isSelected()) {
+            // Admin login
+            AdminDAO adminDAO = new AdminDAO();
+            // Create admin table if it doesn't exist
+            adminDAO.createAdminTableIfNotExists();
 
-        if (student != null) {
-            JOptionPane.showMessageDialog(this, "Login successful! Welcome, " + student.getName(),
-                    "Success", JOptionPane.INFORMATION_MESSAGE);
-            dispose();
-            new ExamEnrollmentSystem(student.getId()).setVisible(true);
+            Admin admin = adminDAO.loginAdmin(emailOrUsername, password);
+
+            if (admin != null) {
+                JOptionPane.showMessageDialog(this, "Admin login successful! Welcome, " + admin.getUsername(),
+                        "Success", JOptionPane.INFORMATION_MESSAGE);
+                dispose();
+                new AdminDashboard(admin).setVisible(true);
+            } else {
+                JOptionPane.showMessageDialog(this, "Invalid admin credentials.",
+                        "Login Failed", JOptionPane.ERROR_MESSAGE);
+            }
         } else {
-            JOptionPane.showMessageDialog(this, "Invalid email or password.",
-                    "Login Failed", JOptionPane.ERROR_MESSAGE);
+            // Student login
+            StudentDAO studentDAO = new StudentDAO();
+            Student student = studentDAO.loginStudent(emailOrUsername, password);
+
+            if (student != null) {
+                JOptionPane.showMessageDialog(this, "Login successful! Welcome, " + student.getName(),
+                        "Success", JOptionPane.INFORMATION_MESSAGE);
+                dispose();
+                new ExamEnrollmentSystem(student.getId()).setVisible(true);
+            } else {
+                JOptionPane.showMessageDialog(this, "Invalid email or password.",
+                        "Login Failed", JOptionPane.ERROR_MESSAGE);
+            }
         }
     }
 
@@ -169,7 +200,7 @@ public class LoginFormGUI extends JFrame {
         JButton submitButton = new JButton("Register");
         submitButton.setBackground(new Color(34, 139, 34));
         submitButton.setForeground(Color.WHITE);
-        submitButton.addActionListener(e -> {
+        submitButton.addActionListener(event -> {
             String name = nameField.getText().trim();
             String email = regEmailField.getText().trim();
             String password = new String(regPasswordField.getPassword());

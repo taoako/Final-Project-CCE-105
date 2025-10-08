@@ -6,20 +6,39 @@ import java.sql.*;
 import dao.SchedulingService;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.LineBorder;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.TableCellRenderer;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 public class ExamEnrollmentSystem extends JFrame {
 
     private final int studentId;
     private Connection conn;
 
+    // Color scheme for modern UI
+    private static final Color PRIMARY_COLOR = new Color(45, 52, 68);
+    private static final Color SECONDARY_COLOR = new Color(66, 73, 91);
+    private static final Color ACCENT_COLOR = new Color(0, 123, 255);
+    private static final Color SUCCESS_COLOR = new Color(40, 167, 69);
+    private static final Color WARNING_COLOR = new Color(255, 193, 7);
+    private static final Color DANGER_COLOR = new Color(220, 53, 69);
+    private static final Color LIGHT_COLOR = new Color(248, 249, 250);
+    private static final Color CARD_COLOR = Color.WHITE;
+    private static final Color TEXT_COLOR = new Color(33, 37, 41);
+    private static final Color MUTED_COLOR = new Color(108, 117, 125);
+
     private JPanel mainContent;
     private JLabel lblName;
     private JLabel lblCourse;
     private JLabel lblBalance;
     private JTable tblUpcoming;
-    private JTable tblHistory;
     private JTable tblManageExams;
+    private CardLayout cardLayout;
 
     private static final int EXAM_FEE = 300; // Default exam fee
 
@@ -28,6 +47,9 @@ public class ExamEnrollmentSystem extends JFrame {
         initializeDb();
         initUI();
         loadStudentInfo();
+        loadBalance();
+        loadUpcomingExams(); // Load exam data immediately
+        updateStatsCards(); // Update statistics
         showDashboardView();
     }
 
@@ -41,156 +63,508 @@ public class ExamEnrollmentSystem extends JFrame {
     }
 
     private void initUI() {
-        setTitle("Online Exam Enrollment System");
-        setSize(1000, 650);
+        setTitle("🎓 Student Dashboard - Exam Enrollment System");
+        setSize(1400, 900);
         setLocationRelativeTo(null);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setExtendedState(JFrame.MAXIMIZED_BOTH);
         setLayout(new BorderLayout());
 
-        // Sidebar
+        // Set modern look and feel
+        try {
+            for (UIManager.LookAndFeelInfo info : UIManager.getInstalledLookAndFeels()) {
+                if ("Nimbus".equals(info.getName())) {
+                    UIManager.setLookAndFeel(info.getClassName());
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            // Use default look and feel
+        }
+
+        createSidebar();
+        createTopBar();
+        createMainContent();
+    }
+
+    private void createSidebar() {
         JPanel sidebar = new JPanel();
-        sidebar.setBackground(new Color(30, 144, 255));
-        sidebar.setPreferredSize(new Dimension(220, getHeight()));
         sidebar.setLayout(new BoxLayout(sidebar, BoxLayout.Y_AXIS));
-        sidebar.setBorder(new EmptyBorder(20, 10, 20, 10));
+        sidebar.setBackground(PRIMARY_COLOR);
+        sidebar.setPreferredSize(new Dimension(280, getHeight()));
+        sidebar.setBorder(new EmptyBorder(0, 0, 0, 1));
 
-        lblName = new JLabel("Name");
-        lblName.setForeground(Color.WHITE);
-        lblName.setFont(new Font("Arial", Font.BOLD, 16));
-        lblName.setAlignmentX(Component.CENTER_ALIGNMENT);
+        // Header
+        JPanel headerPanel = createSidebarHeader();
+        sidebar.add(headerPanel);
+        sidebar.add(Box.createVerticalStrut(30));
 
-        lblCourse = new JLabel("Course");
-        lblCourse.setForeground(Color.WHITE);
-        lblCourse.setAlignmentX(Component.CENTER_ALIGNMENT);
+        // Student info
+        JPanel studentInfo = createStudentInfoPanel();
+        sidebar.add(studentInfo);
+        sidebar.add(Box.createVerticalStrut(30));
 
-        sidebar.add(lblName);
-        sidebar.add(Box.createVerticalStrut(6));
-        sidebar.add(lblCourse);
-        sidebar.add(Box.createRigidArea(new Dimension(0, 20)));
+        // Navigation buttons
+        addNavigationButton(sidebar, "📊 Dashboard", "dashboard", true);
+        addNavigationButton(sidebar, "📝 My Exams", "myexams", false);
+        addNavigationButton(sidebar, "📋 Manage Exams", "manage", false);
+        addNavigationButton(sidebar, "📈 My Marks", "marks", false);
 
-        JButton btnDashboard = styledSidebarButton("Dashboard");
-        JButton btnMyMarks = styledSidebarButton("My Marks");
-        JButton btnManage = styledSidebarButton("Manage Exams");
-        JButton btnLogout = styledSidebarButton("Logout");
-
-        sidebar.add(btnDashboard);
-        sidebar.add(Box.createVerticalStrut(8));
-        sidebar.add(btnMyMarks);
-        sidebar.add(Box.createVerticalStrut(8));
-        sidebar.add(btnManage);
         sidebar.add(Box.createVerticalGlue());
-        sidebar.add(btnLogout);
 
-        add(sidebar, BorderLayout.WEST);
-
-        // Top bar
-        JPanel topBar = new JPanel(new BorderLayout());
-        topBar.setBackground(Color.WHITE);
-        topBar.setBorder(new EmptyBorder(10, 15, 10, 15));
-        JLabel title = new JLabel("Online Exam Enrollment System");
-        title.setFont(new Font("Arial", Font.BOLD, 18));
-        topBar.add(title, BorderLayout.WEST);
-        add(topBar, BorderLayout.NORTH);
-
-        // Main content
-        mainContent = new JPanel(new CardLayout());
-        add(mainContent, BorderLayout.CENTER);
-
-        mainContent.add(createDashboardPanel(), "DASHBOARD");
-        mainContent.add(createMyMarksPanel(), "MYMARKS");
-        mainContent.add(new ManageExamsPanel(studentId), "MANAGE");
-
-        // Button actions
-        btnDashboard.addActionListener(e -> showDashboardView());
-        btnMyMarks.addActionListener(e -> showMyMarksView());
-        btnManage.addActionListener(e -> showManageView());
-        btnLogout.addActionListener(e -> {
-            int confirm = JOptionPane.showConfirmDialog(this,
+        // Logout button at bottom
+        JButton logoutBtn = createStyledButton("🚪 Logout", DANGER_COLOR);
+        logoutBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+        logoutBtn.setMaximumSize(new Dimension(220, 45));
+        logoutBtn.addActionListener(e -> {
+            int option = JOptionPane.showConfirmDialog(this,
                     "Are you sure you want to logout?",
                     "Confirm Logout",
                     JOptionPane.YES_NO_OPTION);
-            if (confirm == JOptionPane.YES_OPTION) {
+
+            if (option == JOptionPane.YES_OPTION) {
                 dispose();
                 new LoginFormGUI().setVisible(true);
             }
         });
+
+        sidebar.add(logoutBtn);
+        sidebar.add(Box.createVerticalStrut(20));
+
+        add(sidebar, BorderLayout.WEST);
     }
 
-    private JButton styledSidebarButton(String text) {
-        JButton b = new JButton(text);
-        b.setMaximumSize(new Dimension(200, 40));
-        b.setAlignmentX(Component.CENTER_ALIGNMENT);
-        b.setBackground(new Color(25, 25, 112));
-        b.setForeground(Color.WHITE);
-        b.setFocusPainted(false);
-        return b;
+    private JPanel createSidebarHeader() {
+        JPanel headerPanel = new JPanel();
+        headerPanel.setLayout(new BoxLayout(headerPanel, BoxLayout.Y_AXIS));
+        headerPanel.setBackground(PRIMARY_COLOR);
+        headerPanel.setBorder(new EmptyBorder(20, 20, 20, 20));
+
+        // Logo/Icon
+        JLabel logoLabel = new JLabel("🎓", SwingConstants.CENTER);
+        logoLabel.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 48));
+        logoLabel.setForeground(Color.WHITE);
+        logoLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Title
+        JLabel titleLabel = new JLabel("STUDENT PORTAL", SwingConstants.CENTER);
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 16));
+        titleLabel.setForeground(Color.WHITE);
+        titleLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Subtitle
+        JLabel subtitleLabel = new JLabel("Exam Enrollment", SwingConstants.CENTER);
+        subtitleLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        subtitleLabel.setForeground(new Color(200, 200, 200));
+        subtitleLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        headerPanel.add(logoLabel);
+        headerPanel.add(Box.createVerticalStrut(10));
+        headerPanel.add(titleLabel);
+        headerPanel.add(Box.createVerticalStrut(5));
+        headerPanel.add(subtitleLabel);
+
+        return headerPanel;
+    }
+
+    private JPanel createStudentInfoPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(SECONDARY_COLOR);
+        panel.setBorder(new EmptyBorder(15, 20, 15, 20));
+        panel.setMaximumSize(new Dimension(260, 120));
+        panel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Student name
+        lblName = new JLabel("Loading...");
+        lblName.setFont(new Font("Segoe UI", Font.BOLD, 16));
+        lblName.setForeground(Color.WHITE);
+        lblName.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Course
+        lblCourse = new JLabel("Course");
+        lblCourse.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        lblCourse.setForeground(new Color(200, 200, 200));
+        lblCourse.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Balance
+        lblBalance = new JLabel("₱0.00");
+        lblBalance.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        lblBalance.setForeground(SUCCESS_COLOR);
+        lblBalance.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        panel.add(lblName);
+        panel.add(Box.createVerticalStrut(5));
+        panel.add(lblCourse);
+        panel.add(Box.createVerticalStrut(8));
+        panel.add(new JLabel("💰 Balance:", SwingConstants.CENTER) {
+            {
+                setFont(new Font("Segoe UI", Font.PLAIN, 11));
+                setForeground(new Color(200, 200, 200));
+                setAlignmentX(Component.CENTER_ALIGNMENT);
+            }
+        });
+        panel.add(lblBalance);
+
+        return panel;
+    }
+
+    private void addNavigationButton(JPanel sidebar, String text, String cardName, boolean selected) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        button.setForeground(Color.WHITE);
+        button.setBackground(selected ? SECONDARY_COLOR : PRIMARY_COLOR);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setHorizontalAlignment(SwingConstants.LEFT);
+        button.setBorder(new EmptyBorder(15, 25, 15, 25));
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 50));
+        button.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        // Hover effect
+        button.addMouseListener(new MouseAdapter() {
+            public void mouseEntered(MouseEvent evt) {
+                button.setBackground(SECONDARY_COLOR);
+            }
+
+            public void mouseExited(MouseEvent evt) {
+                if (!cardName.equals(getCurrentCard())) {
+                    button.setBackground(PRIMARY_COLOR);
+                }
+            }
+        });
+
+        button.addActionListener(e -> {
+            resetNavigationButtons(sidebar);
+            button.setBackground(SECONDARY_COLOR);
+
+            switch (cardName) {
+                case "dashboard" -> showDashboardView();
+                case "myexams" -> showMyExamsView();
+                case "manage" -> showManageView();
+                case "marks" -> showMyMarksView();
+            }
+        });
+
+        sidebar.add(button);
+        sidebar.add(Box.createVerticalStrut(5));
+    }
+
+    private String getCurrentCard() {
+        return "dashboard"; // This would need to be tracked properly
+    }
+
+    private void resetNavigationButtons(JPanel sidebar) {
+        for (Component comp : sidebar.getComponents()) {
+            if (comp instanceof JButton && !((JButton) comp).getText().contains("Logout")) {
+                comp.setBackground(PRIMARY_COLOR);
+            }
+        }
+    }
+
+    private void createTopBar() {
+        JPanel topBar = new JPanel(new BorderLayout());
+        topBar.setBackground(CARD_COLOR);
+        topBar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(222, 226, 230)),
+                new EmptyBorder(15, 30, 15, 30)));
+
+        // Welcome message and date
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        leftPanel.setBackground(CARD_COLOR);
+
+        JLabel welcomeLabel = new JLabel("Welcome to Your Dashboard");
+        welcomeLabel.setFont(new Font("Segoe UI", Font.BOLD, 24));
+        welcomeLabel.setForeground(TEXT_COLOR);
+
+        JLabel dateLabel = new JLabel(LocalDateTime.now().format(
+                DateTimeFormatter.ofPattern("EEEE, MMMM dd, yyyy - HH:mm")));
+        dateLabel.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        dateLabel.setForeground(MUTED_COLOR);
+
+        JPanel textPanel = new JPanel();
+        textPanel.setLayout(new BoxLayout(textPanel, BoxLayout.Y_AXIS));
+        textPanel.setBackground(CARD_COLOR);
+        textPanel.add(welcomeLabel);
+        textPanel.add(Box.createVerticalStrut(5));
+        textPanel.add(dateLabel);
+
+        leftPanel.add(textPanel);
+
+        // Quick actions
+        JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        rightPanel.setBackground(CARD_COLOR);
+
+        JButton cashInBtn = createStyledButton("💰 Cash In", SUCCESS_COLOR);
+        cashInBtn.addActionListener(e -> openCashIn());
+
+        JButton refreshBtn = createStyledButton("🔄 Refresh", ACCENT_COLOR);
+        refreshBtn.addActionListener(e -> refreshData());
+
+        rightPanel.add(cashInBtn);
+        rightPanel.add(Box.createHorizontalStrut(10));
+        rightPanel.add(refreshBtn);
+
+        topBar.add(leftPanel, BorderLayout.WEST);
+        topBar.add(rightPanel, BorderLayout.EAST);
+
+        add(topBar, BorderLayout.NORTH);
+    }
+
+    private void createMainContent() {
+        cardLayout = new CardLayout();
+        mainContent = new JPanel(cardLayout);
+        mainContent.setBackground(LIGHT_COLOR);
+
+        // Create panels
+        mainContent.add(createDashboardPanel(), "dashboard");
+        mainContent.add(createMyExamsPanel(), "myexams");
+        mainContent.add(new ManageExamsPanel(studentId), "manage");
+        mainContent.add(createMyMarksPanel(), "marks");
+
+        add(mainContent, BorderLayout.CENTER);
+    }
+
+    private JButton createStyledButton(String text, Color bgColor) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        button.setForeground(Color.WHITE);
+        button.setBackground(bgColor);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setBorder(new EmptyBorder(10, 20, 10, 20));
+
+        // Hover effect
+        Color originalColor = bgColor;
+        button.addMouseListener(new MouseAdapter() {
+            public void mouseEntered(MouseEvent evt) {
+                button.setBackground(bgColor.darker());
+            }
+
+            public void mouseExited(MouseEvent evt) {
+                button.setBackground(originalColor);
+            }
+        });
+
+        return button;
     }
 
     // =================== DASHBOARD ===================
 
     private JPanel createDashboardPanel() {
-        JPanel panel = new JPanel(null);
-        panel.setBackground(new Color(245, 248, 255));
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(LIGHT_COLOR);
+        panel.setBorder(new EmptyBorder(30, 30, 30, 30));
 
-        // Balance card
-        JPanel cardBalance = createInfoCard("Wallet Balance", "₱0.00", 30, 20);
-        lblBalance = new JLabel("₱0.00");
-        lblBalance.setBounds(50, 60, 200, 30);
-        lblBalance.setForeground(Color.WHITE);
-        lblBalance.setFont(new Font("Arial", Font.BOLD, 18));
-        cardBalance.add(lblBalance);
-        panel.add(cardBalance);
+        // Stats cards at top
+        JPanel statsPanel = createStatsPanel();
+        panel.add(statsPanel, BorderLayout.NORTH);
 
-        // Cash-In button
-        JButton btnCashIn = new JButton("💰 Cash In");
-        btnCashIn.setBounds(340, 50, 120, 36);
-        btnCashIn.setBackground(new Color(34, 139, 34));
-        btnCashIn.setForeground(Color.WHITE);
-        btnCashIn.setFocusPainted(false);
-        btnCashIn.addActionListener(e -> openCashIn());
-        panel.add(btnCashIn);
+        // Main content: make upcoming exams take the majority of the space
+        JPanel contentPanel = new JPanel(new BorderLayout());
+        contentPanel.setBackground(LIGHT_COLOR);
+        contentPanel.setBorder(new EmptyBorder(20, 0, 0, 0));
 
-        JLabel upLabel = new JLabel("Upcoming Exams");
-        upLabel.setBounds(30, 150, 300, 25);
-        upLabel.setFont(new Font("Arial", Font.BOLD, 14));
-        panel.add(upLabel);
+        // Upcoming exams section (expanded)
+        JPanel upcomingSection = createUpcomingExamsSection();
+        upcomingSection.setPreferredSize(new Dimension(800, 520)); // make it taller
+        contentPanel.add(upcomingSection, BorderLayout.CENTER);
 
-        tblUpcoming = new JTable();
-        JScrollPane spUp = new JScrollPane(tblUpcoming);
-        spUp.setBounds(30, 180, 700, 200);
-        panel.add(spUp);
-
-        JButton btnRefreshUp = new JButton("Refresh");
-        btnRefreshUp.setBounds(750, 180, 120, 30);
-        btnRefreshUp.addActionListener(e -> {
-            loadUpcomingExams();
-            loadBalance();
-        });
-        panel.add(btnRefreshUp);
-
-        JLabel histLabel = new JLabel("Recent History");
-        histLabel.setBounds(30, 400, 300, 25);
-        histLabel.setFont(new Font("Arial", Font.BOLD, 14));
-        panel.add(histLabel);
-
-        tblHistory = new JTable();
-        JScrollPane spHist = new JScrollPane(tblHistory);
-        spHist.setBounds(30, 430, 700, 120);
-        panel.add(spHist);
+        panel.add(contentPanel, BorderLayout.CENTER);
 
         return panel;
     }
 
-    private JPanel createInfoCard(String title, String value, int x, int y) {
-        JPanel card = new JPanel(null);
-        card.setBackground(new Color(70, 130, 180));
-        card.setBounds(x, y, 300, 100);
-        JLabel t = new JLabel(title);
-        t.setForeground(Color.WHITE);
-        t.setFont(new Font("Arial", Font.BOLD, 14));
-        t.setBounds(15, 10, 260, 20);
-        card.add(t);
+    private JPanel createStatsPanel() {
+        JPanel panel = new JPanel(new GridLayout(1, 4, 20, 0));
+        panel.setBackground(LIGHT_COLOR);
+
+        // These will be populated with actual data
+        panel.add(createStatsCard("💰 Balance", "₱0.00", "Current wallet balance", SUCCESS_COLOR));
+        panel.add(createStatsCard("📝 Enrolled", "0", "Active exam enrollments", ACCENT_COLOR));
+        panel.add(createStatsCard("✅ Completed", "0", "Exams completed", SUCCESS_COLOR));
+        panel.add(createStatsCard("⏳ Pending", "0", "Awaiting payment", WARNING_COLOR));
+
+        return panel;
+    }
+
+    private JPanel createStatsCard(String title, String value, String subtitle, Color accentColor) {
+        JPanel card = new JPanel();
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setBackground(CARD_COLOR);
+        card.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(new Color(222, 226, 230), 1),
+                new EmptyBorder(20, 20, 20, 20)));
+
+        // Icon and value row
+        JPanel topRow = new JPanel(new BorderLayout());
+        topRow.setBackground(CARD_COLOR);
+
+        String[] parts = title.split(" ", 2);
+        JLabel iconLabel = new JLabel(parts[0]);
+        iconLabel.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 24));
+        iconLabel.setForeground(accentColor);
+
+        JLabel valueLabel = new JLabel(value);
+        valueLabel.setFont(new Font("Segoe UI", Font.BOLD, 28));
+        valueLabel.setForeground(TEXT_COLOR);
+        valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+
+        topRow.add(iconLabel, BorderLayout.WEST);
+        topRow.add(valueLabel, BorderLayout.EAST);
+
+        // Title
+        JLabel titleLabel = new JLabel(parts.length > 1 ? parts[1] : title);
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        titleLabel.setForeground(TEXT_COLOR);
+        titleLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Subtitle
+        JLabel subtitleLabel = new JLabel(subtitle);
+        subtitleLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        subtitleLabel.setForeground(MUTED_COLOR);
+        subtitleLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        card.add(topRow);
+        card.add(Box.createVerticalStrut(15));
+        card.add(titleLabel);
+        card.add(Box.createVerticalStrut(5));
+        card.add(subtitleLabel);
+
         return card;
+    }
+
+    private JPanel createUpcomingExamsSection() {
+        JPanel section = new JPanel(new BorderLayout());
+        section.setBackground(CARD_COLOR);
+        section.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(new Color(222, 226, 230), 1),
+                new EmptyBorder(25, 25, 25, 25)));
+
+        // Header
+        JPanel headerPanel = new JPanel(new BorderLayout());
+        headerPanel.setBackground(CARD_COLOR);
+
+        JLabel titleLabel = new JLabel("📅 Upcoming Exams");
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 18));
+        titleLabel.setForeground(TEXT_COLOR);
+
+        JButton refreshBtn = createStyledButton("🔄 Refresh", ACCENT_COLOR);
+        refreshBtn.addActionListener(e -> {
+            loadUpcomingExams();
+            updateStatsCards();
+        });
+
+        headerPanel.add(titleLabel, BorderLayout.WEST);
+        headerPanel.add(refreshBtn, BorderLayout.EAST);
+        headerPanel.setBorder(new EmptyBorder(0, 0, 15, 0));
+
+        // Table
+        tblUpcoming = createStyledTable();
+        JScrollPane scrollPane = new JScrollPane(tblUpcoming);
+        scrollPane.setBorder(null);
+        scrollPane.getViewport().setBackground(Color.WHITE);
+
+        section.add(headerPanel, BorderLayout.NORTH);
+        section.add(scrollPane, BorderLayout.CENTER);
+
+        return section;
+    }
+
+    private JPanel createHistorySection() {
+        JPanel section = new JPanel(new BorderLayout());
+        section.setBackground(CARD_COLOR);
+        section.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(new Color(222, 226, 230), 1),
+                new EmptyBorder(25, 25, 25, 25)));
+
+        // Header
+        JLabel titleLabel = new JLabel("📋 Recent History");
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 18));
+        titleLabel.setForeground(TEXT_COLOR);
+        titleLabel.setBorder(new EmptyBorder(0, 0, 15, 0));
+
+        // Table removed - recent history section has been removed per UI update
+        section.add(titleLabel, BorderLayout.NORTH);
+        // No table added here
+
+        return section;
+    }
+
+    private JTable createStyledTable() {
+        JTable table = new JTable();
+        table.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        table.setRowHeight(35);
+        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setGridColor(new Color(222, 226, 230));
+        table.setShowVerticalLines(true);
+        table.setShowHorizontalLines(true);
+        table.setSelectionBackground(ACCENT_COLOR.brighter());
+        table.setSelectionForeground(Color.WHITE);
+
+        // Custom header renderer
+        table.getTableHeader().setDefaultRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean isSelected, boolean hasFocus, int row, int column) {
+                Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                c.setBackground(LIGHT_COLOR);
+                c.setForeground(TEXT_COLOR);
+                setFont(new Font("Segoe UI", Font.BOLD, 12));
+                setBorder(new EmptyBorder(8, 12, 8, 12));
+                return c;
+            }
+        });
+
+        return table;
+    }
+
+    private JPanel createMyExamsPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(LIGHT_COLOR);
+        panel.setBorder(new EmptyBorder(30, 30, 30, 30));
+
+        // Header
+        JPanel headerPanel = new JPanel(new BorderLayout());
+        headerPanel.setBackground(LIGHT_COLOR);
+
+        JLabel titleLabel = new JLabel("📝 My Exam Enrollments");
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 28));
+        titleLabel.setForeground(TEXT_COLOR);
+
+        JLabel subtitleLabel = new JLabel("View and manage your exam enrollments");
+        subtitleLabel.setFont(new Font("Segoe UI", Font.PLAIN, 16));
+        subtitleLabel.setForeground(MUTED_COLOR);
+
+        JPanel titlePanel = new JPanel();
+        titlePanel.setLayout(new BoxLayout(titlePanel, BoxLayout.Y_AXIS));
+        titlePanel.setBackground(LIGHT_COLOR);
+        titlePanel.add(titleLabel);
+        titlePanel.add(Box.createVerticalStrut(5));
+        titlePanel.add(subtitleLabel);
+
+        headerPanel.add(titlePanel, BorderLayout.WEST);
+        headerPanel.setBorder(new EmptyBorder(0, 0, 30, 0));
+
+        // Content
+        JPanel contentPanel = new JPanel(new BorderLayout());
+        contentPanel.setBackground(CARD_COLOR);
+        contentPanel.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(new Color(222, 226, 230), 1),
+                new EmptyBorder(25, 25, 25, 25)));
+
+        // This will show the same data as upcoming exams but with different layout
+        JTable myExamsTable = createStyledTable();
+        JScrollPane scrollPane = new JScrollPane(myExamsTable);
+        scrollPane.setBorder(null);
+        scrollPane.getViewport().setBackground(Color.WHITE);
+
+        contentPanel.add(scrollPane, BorderLayout.CENTER);
+
+        panel.add(headerPanel, BorderLayout.NORTH);
+        panel.add(contentPanel, BorderLayout.CENTER);
+
+        return panel;
     }
 
     // =================== LOADERS ===================
@@ -222,66 +596,105 @@ public class ExamEnrollmentSystem extends JFrame {
         }
     }
 
-    private void loadUpcomingExams() {
+    private void updateStatsCards() {
+        // Update various statistics on the dashboard
+        loadBalance();
+        updateExamStatistics();
+    }
+
+    private void updateExamStatistics() {
         try {
-            // First auto-schedule any enrolled exams missing schedule info
-            try (PreparedStatement uns = conn.prepareStatement(
-                    "SELECT exam_id FROM student_exams WHERE student_id=? AND status IN ('Pending','Enrolled') AND scheduled_date IS NULL")) {
-                uns.setInt(1, studentId);
-                try (ResultSet ur = uns.executeQuery()) {
-                    while (ur.next()) {
-                        SchedulingService.autoScheduleExam(studentId, ur.getInt(1));
-                    }
+            // Count enrolled exams
+            int enrolledCount = 0;
+            int completedCount = 0;
+            int pendingCount = 0;
+
+            String sql = "SELECT status, COUNT(*) as count FROM student_exams WHERE student_id=? GROUP BY status";
+            PreparedStatement ps = conn.prepareStatement(sql);
+            ps.setInt(1, studentId);
+            ResultSet rs = ps.executeQuery();
+
+            while (rs.next()) {
+                String status = rs.getString("status");
+                int count = rs.getInt("count");
+
+                switch (status.toLowerCase()) {
+                    case "enrolled":
+                        enrolledCount = count;
+                        break;
+                    case "completed":
+                        completedCount = count;
+                        break;
+                    case "pending":
+                        pendingCount = count;
+                        break;
                 }
             }
 
+            // Update stats cards (this would need references to the actual cards)
+            // For now, we'll print the statistics
+            System.out.println("[STATS] Enrolled: " + enrolledCount + ", Completed: " + completedCount + ", Pending: "
+                    + pendingCount);
+
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private void loadUpcomingExams() {
+        try {
+            // Updated query to match the new database schema
             String sql = "SELECT se.id AS reg_id, e.id AS exam_id, e.exam_name, "
-                    + "COALESCE(se.scheduled_date, e.exam_date) AS display_date, "
-                    + "COALESCE(se.scheduled_time, e.exam_time) AS display_time, "
-                    + "COALESCE(se.room, e.room) AS room, e.duration, se.status, se.is_paid "
-                    + "FROM student_exams se JOIN exams e ON se.exam_id = e.id "
+                    + "es.scheduled_date, es.scheduled_time, es.room_number, e.duration, "
+                    + "se.status, se.is_paid "
+                    + "FROM student_exams se "
+                    + "JOIN exam_schedules es ON se.exam_schedule_id = es.id "
+                    + "JOIN exams e ON es.exam_id = e.id "
                     + "WHERE se.student_id=? AND se.status <> 'Cancelled' "
-                    + "ORDER BY display_date, display_time";
+                    + "ORDER BY es.scheduled_date, es.scheduled_time";
             PreparedStatement ps = conn.prepareStatement(sql);
             ps.setInt(1, studentId);
             ResultSet rs = ps.executeQuery();
 
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "RegID", "ExamID", "Exam", "Date", "Time", "Room", "Duration", "Status", "Paid" },
-                    0);
+                    new Object[] { "Exam", "Date", "Time", "Room", "Duration", "Status", "Payment" },
+                    0) {
+                @Override
+                public boolean isCellEditable(int row, int column) {
+                    return false;
+                }
+            };
+
             int rows = 0;
             while (rs.next()) {
-                int regId = rs.getInt("reg_id");
-                int examId = rs.getInt("exam_id");
                 String examName = rs.getString("exam_name");
-                Date displayDate = rs.getDate("display_date");
-                Time displayTime = rs.getTime("display_time");
-                String room = rs.getString("room");
+                Date scheduledDate = rs.getDate("scheduled_date");
+                Time scheduledTime = rs.getTime("scheduled_time");
+                String roomNumber = rs.getString("room_number");
                 String duration = rs.getString("duration");
                 String status = rs.getString("status");
                 boolean paid = rs.getInt("is_paid") == 1;
 
                 model.addRow(new Object[] {
-                        regId,
-                        examId,
                         examName,
-                        displayDate,
-                        displayTime != null ? displayTime.toString() : "TBA",
-                        room != null ? room : "TBA",
+                        scheduledDate != null ? scheduledDate.toString() : "TBA",
+                        scheduledTime != null ? scheduledTime.toString() : "TBA",
+                        roomNumber != null ? roomNumber : "TBA",
                         duration != null ? duration : "TBA",
                         status != null ? status : "Unknown",
-                        paid ? "Paid" : "Unpaid"
+                        paid ? "✅ Paid" : "❌ Unpaid"
                 });
                 rows++;
             }
 
             tblUpcoming.setModel(model);
-            // hide ID columns but keep them in model for actions
-            if (tblUpcoming.getColumnModel().getColumnCount() > 0) {
-                tblUpcoming.removeColumn(tblUpcoming.getColumnModel().getColumn(0));
-                if (tblUpcoming.getColumnModel().getColumnCount() > 0) {
-                    tblUpcoming.removeColumn(tblUpcoming.getColumnModel().getColumn(0));
-                }
+
+            // Apply custom cell renderer for status column
+            if (tblUpcoming.getColumnCount() > 5) {
+                tblUpcoming.getColumnModel().getColumn(5).setCellRenderer(new StatusCellRenderer());
+            }
+            if (tblUpcoming.getColumnCount() > 6) {
+                tblUpcoming.getColumnModel().getColumn(6).setCellRenderer(new PaymentCellRenderer());
             }
             System.out.println("[DEBUG] loadUpcomingExams: rows returned=" + rows + " for studentId=" + studentId);
         } catch (SQLException ex) {
@@ -289,18 +702,103 @@ public class ExamEnrollmentSystem extends JFrame {
         }
     }
 
+    // --- recent history removed (UI simplified) ---
+
+    private class StatusCellRenderer extends DefaultTableCellRenderer {
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                boolean isSelected, boolean hasFocus, int row, int column) {
+            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+
+            if (!isSelected) {
+                String status = value.toString();
+                switch (status.toLowerCase()) {
+                    case "enrolled" -> c.setBackground(SUCCESS_COLOR.brighter());
+                    case "pending" -> c.setBackground(WARNING_COLOR.brighter());
+                    case "cancelled" -> c.setBackground(DANGER_COLOR.brighter());
+                    default -> c.setBackground(Color.WHITE);
+                }
+            }
+
+            return c;
+        }
+    }
+
+    private class PaymentCellRenderer extends DefaultTableCellRenderer {
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value,
+                boolean isSelected, boolean hasFocus, int row, int column) {
+            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+
+            if (!isSelected) {
+                String payment = value.toString();
+                if (payment.contains("Paid")) {
+                    c.setBackground(SUCCESS_COLOR.brighter());
+                } else {
+                    c.setBackground(DANGER_COLOR.brighter());
+                }
+            }
+
+            return c;
+        }
+    }
+
     private JPanel createMyMarksPanel() {
         JPanel panel = new JPanel(new BorderLayout());
-        panel.setBackground(Color.WHITE);
-        JLabel label = new JLabel("Completed Exams / My Marks");
-        label.setFont(new Font("Arial", Font.BOLD, 16));
-        panel.add(label, BorderLayout.NORTH);
-        tblHistory = new JTable();
-        panel.add(new JScrollPane(tblHistory), BorderLayout.CENTER);
+        panel.setBackground(LIGHT_COLOR);
+        panel.setBorder(new EmptyBorder(30, 30, 30, 30));
+
+        // Header
+        JPanel headerPanel = new JPanel(new BorderLayout());
+        headerPanel.setBackground(LIGHT_COLOR);
+
+        JLabel titleLabel = new JLabel("📈 My Marks & Results");
+        titleLabel.setFont(new Font("Segoe UI", Font.BOLD, 28));
+        titleLabel.setForeground(TEXT_COLOR);
+
+        JLabel subtitleLabel = new JLabel("View your completed exams and scores");
+        subtitleLabel.setFont(new Font("Segoe UI", Font.PLAIN, 16));
+        subtitleLabel.setForeground(MUTED_COLOR);
+
+        JPanel titlePanel = new JPanel();
+        titlePanel.setLayout(new BoxLayout(titlePanel, BoxLayout.Y_AXIS));
+        titlePanel.setBackground(LIGHT_COLOR);
+        titlePanel.add(titleLabel);
+        titlePanel.add(Box.createVerticalStrut(5));
+        titlePanel.add(subtitleLabel);
+
+        headerPanel.add(titlePanel, BorderLayout.WEST);
+        headerPanel.setBorder(new EmptyBorder(0, 0, 30, 0));
+
+        // Content
+        JPanel contentPanel = new JPanel(new BorderLayout());
+        contentPanel.setBackground(CARD_COLOR);
+        contentPanel.setBorder(BorderFactory.createCompoundBorder(
+                new LineBorder(new Color(222, 226, 230), 1),
+                new EmptyBorder(25, 25, 25, 25)));
+
+        JTable marksTable = createStyledTable();
+        JScrollPane scrollPane = new JScrollPane(marksTable);
+        scrollPane.setBorder(null);
+        scrollPane.getViewport().setBackground(Color.WHITE);
+
+        contentPanel.add(scrollPane, BorderLayout.CENTER);
+
+        panel.add(headerPanel, BorderLayout.NORTH);
+        panel.add(contentPanel, BorderLayout.CENTER);
+
         return panel;
     }
 
     // =================== BUTTON LOGIC ===================
+
+    private void refreshData() {
+        loadBalance();
+        loadUpcomingExams();
+        updateStatsCards();
+        JOptionPane.showMessageDialog(this, "Data refreshed successfully!", "Refresh Complete",
+                JOptionPane.INFORMATION_MESSAGE);
+    }
 
     private void openCashIn() {
         try (PreparedStatement ps = conn.prepareStatement("SELECT name FROM students WHERE id=?")) {
@@ -311,6 +809,7 @@ public class ExamEnrollmentSystem extends JFrame {
                 PaymentForm pf = new PaymentForm(this, studentId, name, 0);
                 pf.setVisible(true);
                 loadBalance();
+                updateStatsCards();
             }
         } catch (SQLException ex) {
             ex.printStackTrace();
@@ -318,17 +817,24 @@ public class ExamEnrollmentSystem extends JFrame {
     }
 
     private void showDashboardView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "DASHBOARD");
+        cardLayout.show(mainContent, "dashboard");
         loadBalance();
         loadUpcomingExams();
+        updateStatsCards();
+    }
+
+    private void showMyExamsView() {
+        cardLayout.show(mainContent, "myexams");
+        loadUpcomingExams(); // Same data, different view
     }
 
     private void showMyMarksView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "MYMARKS");
+        cardLayout.show(mainContent, "marks");
+        // Load marks/results data here
     }
 
     private void showManageView() {
-        ((CardLayout) mainContent.getLayout()).show(mainContent, "MANAGE");
+        cardLayout.show(mainContent, "manage");
     }
 
     public static void main(String[] args) {

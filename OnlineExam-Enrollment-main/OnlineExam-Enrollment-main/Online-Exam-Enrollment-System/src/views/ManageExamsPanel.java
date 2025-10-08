@@ -1,13 +1,12 @@
 package views;
 
 import dao.DatabaseConnection;
+import dao.SchedulingService; // SchedulingService uses TreeMap + PriorityQueue (see scheduleAndEnrollExam)
 import java.awt.*;
 import java.sql.*;
-import java.time.LocalDate;
-import java.time.LocalTime;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import javax.swing.table.DefaultTableModel;
+import javax.swing.table.*;
 
 public class ManageExamsPanel extends JPanel {
 
@@ -46,17 +45,76 @@ public class ManageExamsPanel extends JPanel {
         JButton btnSearch = new JButton("🔍");
         btnSearch.setFocusPainted(false);
         btnSearch.setBackground(new Color(245, 245, 245));
-        btnSearch.addActionListener(e -> searchExam());
+        btnSearch.addActionListener(this::handleSearchAction);
         searchPanel.add(btnSearch);
 
         topPanel.add(searchPanel, BorderLayout.EAST);
         add(topPanel, BorderLayout.NORTH);
 
         // Center table
-        examTable = new JTable();
+        examTable = new JTable() {
+            // Tooltip support
+            @Override
+            public String getToolTipText(java.awt.event.MouseEvent e) {
+                int row = rowAtPoint(e.getPoint());
+                if (row > -1) {
+                    int modelRow = convertRowIndexToModel(row);
+                    Object statusObj = getModel().getValueAt(modelRow, 3);
+                    String status = statusObj != null ? statusObj.toString() : "";
+                    switch (status) {
+                        case "Available":
+                            return "Exam open for enrollment";
+                        case "Enrolled":
+                            return "You are already enrolled in this exam";
+                        case "Full":
+                        case "Unavailable":
+                            return "Exam is full or no longer available";
+                        case "Ongoing":
+                            return "Exam is currently in progress";
+                    }
+                }
+                return super.getToolTipText(e);
+            }
+        };
+
         examTable.setRowHeight(28);
         examTable.setFont(new Font("Arial", Font.PLAIN, 14));
         examTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+        // Color-coded rows
+        examTable.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean isSelected, boolean hasFocus, int row, int column) {
+                Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                if (!isSelected) {
+                    int modelRow = table.convertRowIndexToModel(row);
+                    Object statusObj = table.getModel().getValueAt(modelRow, 3);
+                    String status = statusObj != null ? statusObj.toString() : "";
+                    switch (status) {
+                        case "Available":
+                            c.setBackground(new Color(204, 255, 204)); // light green
+                            break;
+                        case "Enrolled":
+                            c.setBackground(new Color(204, 229, 255)); // light blue
+                            break;
+                        case "Full":
+                        case "Unavailable":
+                            c.setBackground(new Color(255, 204, 204)); // light red
+                            break;
+                        case "Ongoing":
+                            c.setBackground(new Color(255, 255, 204)); // yellow
+                            break;
+                        default:
+                            c.setBackground(Color.WHITE);
+                            break;
+                    }
+                } else {
+                    c.setBackground(new Color(153, 204, 255)); // highlight selected
+                }
+                return c;
+            }
+        });
 
         JScrollPane scrollPane = new JScrollPane(examTable);
         scrollPane.setBorder(new EmptyBorder(10, 30, 10, 30));
@@ -70,40 +128,61 @@ public class ManageExamsPanel extends JPanel {
         btnProceed.setBackground(new Color(30, 144, 255));
         btnProceed.setForeground(Color.WHITE);
         btnProceed.setFocusPainted(false);
-        btnProceed.addActionListener(e -> proceedExam());
+        btnProceed.addActionListener(this::handleProceedAction);
 
         bottomPanel.add(btnProceed);
         add(bottomPanel, BorderLayout.SOUTH);
     }
 
+    // adapter methods for method references
+    private void handleSearchAction(java.awt.event.ActionEvent e) {
+        searchExam();
+    }
+
+    private void handleProceedAction(java.awt.event.ActionEvent e) {
+        proceedExam();
+    }
+
     // ---------------- DATABASE LOGIC ----------------
     private void loadExams() {
+        // Adapted to database WITHOUT exam_date column; sessions tracked in
+        // exam_schedules.
         try {
-            final int CAPACITY = 30; // default capacity since schema lacks max_students column
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "Exam ID", "Subject", "Date", "Slots", "Status" }, 0);
-            String sql = "SELECT e.id, e.exam_name AS subject, e.exam_date, COUNT(se.id) AS enrolled, " +
-                    "CASE WHEN e.exam_date > CURDATE() THEN 'Available' " +
-                    "WHEN e.exam_date = CURDATE() THEN 'Ongoing' ELSE 'Unavailable' END AS status " +
-                    "FROM exams e LEFT JOIN student_exams se ON e.id = se.exam_id " +
-                    "JOIN students s ON e.course_id = s.course_id WHERE s.id=? GROUP BY e.id ORDER BY e.exam_date";
-
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setInt(1, studentId);
-            ResultSet rs = ps.executeQuery();
-
-            while (rs.next()) {
-                int id = rs.getInt("id");
-                String subject = rs.getString("subject");
-                Date date = rs.getDate("exam_date");
-                int enrolled = rs.getInt("enrolled");
-                String status = rs.getString("status");
-                String slots = enrolled + "/" + CAPACITY;
-                model.addRow(new Object[] { id, subject, date, slots, status });
+                    new Object[] { "Exam ID", "Subject", "Enrolled Today", "Sessions Today", "First Time", "First Room",
+                            "Status" },
+                    0);
+            String sql = "SELECT e.id, e.exam_name AS subject, " +
+                    "(SELECT COUNT(se.id) FROM student_exams se JOIN exam_schedules es2 ON se.exam_schedule_id=es2.id WHERE es2.exam_id=e.id AND es2.scheduled_date=CURDATE()) AS enrolled_today, "
+                    +
+                    "(SELECT COUNT(*) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS sessions_today, "
+                    +
+                    "(SELECT MIN(es.scheduled_time) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS first_time, "
+                    +
+                    "(SELECT es.room_number FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE() ORDER BY es.scheduled_time LIMIT 1) AS first_room, "
+                    +
+                    "CASE WHEN EXISTS (SELECT 1 FROM student_exams se JOIN exam_schedules es ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.exam_id=e.id) THEN 'Enrolled' ELSE 'Available' END AS status "
+                    +
+                    "FROM exams e JOIN students s ON e.course_id=s.course_id WHERE s.id=? ORDER BY e.id";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, studentId);
+                ps.setInt(2, studentId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int id = rs.getInt("id");
+                        String subject = rs.getString("subject");
+                        int enrolledToday = rs.getInt("enrolled_today");
+                        int sessionsToday = rs.getInt("sessions_today");
+                        Time firstTime = rs.getTime("first_time");
+                        String firstRoom = rs.getString("first_room");
+                        String status = rs.getString("status");
+                        model.addRow(new Object[] { id, subject, enrolledToday, sessionsToday, firstTime, firstRoom,
+                                status });
+                    }
+                }
             }
-
             examTable.setModel(model);
-            examTable.removeColumn(examTable.getColumnModel().getColumn(0)); // hide ID
+            examTable.removeColumn(examTable.getColumnModel().getColumn(0)); // hide id
         } catch (SQLException e) {
             e.printStackTrace();
         }
@@ -115,35 +194,43 @@ public class ManageExamsPanel extends JPanel {
             loadExams();
             return;
         }
-
         try {
-            final int CAPACITY = 30;
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "Exam ID", "Subject", "Date", "Slots", "Status" }, 0);
-            String sql = "SELECT e.id, e.exam_name AS subject, e.exam_date, COUNT(se.id) AS enrolled, " +
-                    "CASE WHEN e.exam_date > CURDATE() THEN 'Available' " +
-                    "WHEN e.exam_date = CURDATE() THEN 'Ongoing' ELSE 'Unavailable' END AS status " +
-                    "FROM exams e LEFT JOIN student_exams se ON e.id = se.exam_id " +
-                    "JOIN students s ON e.course_id = s.course_id WHERE s.id=? AND e.exam_name LIKE ? GROUP BY e.id ORDER BY e.exam_date";
-
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setInt(1, studentId);
-            ps.setString(2, "%" + keyword + "%");
-            ResultSet rs = ps.executeQuery();
-
-            while (rs.next()) {
-                int id = rs.getInt("id");
-                String subject = rs.getString("subject");
-                Date date = rs.getDate("exam_date");
-                int enrolled = rs.getInt("enrolled");
-                String status = rs.getString("status");
-                String slots = enrolled + "/" + CAPACITY;
-                model.addRow(new Object[] { id, subject, date, slots, status });
+                    new Object[] { "Exam ID", "Subject", "Enrolled Today", "Sessions Today", "First Time", "First Room",
+                            "Status" },
+                    0);
+            String sql = "SELECT e.id, e.exam_name AS subject, " +
+                    "(SELECT COUNT(se.id) FROM student_exams se JOIN exam_schedules es2 ON se.exam_schedule_id=es2.id WHERE es2.exam_id=e.id AND es2.scheduled_date=CURDATE()) AS enrolled_today, "
+                    +
+                    "(SELECT COUNT(*) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS sessions_today, "
+                    +
+                    "(SELECT MIN(es.scheduled_time) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS first_time, "
+                    +
+                    "(SELECT es.room_number FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE() ORDER BY es.scheduled_time LIMIT 1) AS first_room, "
+                    +
+                    "CASE WHEN EXISTS (SELECT 1 FROM student_exams se JOIN exam_schedules es ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.exam_id=e.id) THEN 'Enrolled' ELSE 'Available' END AS status "
+                    +
+                    "FROM exams e JOIN students s ON e.course_id=s.course_id WHERE s.id=? AND e.exam_name LIKE ? ORDER BY e.id";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, studentId);
+                ps.setInt(2, studentId);
+                ps.setString(3, "%" + keyword + "%");
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        int id = rs.getInt("id");
+                        String subject = rs.getString("subject");
+                        int enrolledToday = rs.getInt("enrolled_today");
+                        int sessionsToday = rs.getInt("sessions_today");
+                        Time firstTime = rs.getTime("first_time");
+                        String firstRoom = rs.getString("first_room");
+                        String status = rs.getString("status");
+                        model.addRow(new Object[] { id, subject, enrolledToday, sessionsToday, firstTime, firstRoom,
+                                status });
+                    }
+                }
             }
-
             examTable.setModel(model);
             examTable.removeColumn(examTable.getColumnModel().getColumn(0));
-
         } catch (SQLException e) {
             e.printStackTrace();
         }
@@ -157,9 +244,17 @@ public class ManageExamsPanel extends JPanel {
             return;
         }
 
-        int examId = getSelectedExamId(row);
-        String subject = (String) examTable.getValueAt(row, 0);
-        String status = (String) examTable.getValueAt(row, 3);
+        int modelRow = examTable.convertRowIndexToModel(row);
+        DefaultTableModel model = (DefaultTableModel) examTable.getModel();
+        int examId = Integer.parseInt(model.getValueAt(modelRow, 0).toString());
+        String subject = model.getValueAt(modelRow, 1).toString();
+        String status = model.getValueAt(modelRow, 6).toString();
+
+        if ("Enrolled".equals(status)) {
+            JOptionPane.showMessageDialog(this, "⚠️ You are already enrolled in this exam.", "Already Enrolled",
+                    JOptionPane.WARNING_MESSAGE);
+            return;
+        }
 
         if (!"Available".equals(status)) {
             JOptionPane.showMessageDialog(this, "This exam is not available right now.", "Unavailable",
@@ -181,29 +276,6 @@ public class ManageExamsPanel extends JPanel {
                     return;
                 }
 
-                // ✅ Check if exam has reached max capacity
-                PreparedStatement limitCheck = conn.prepareStatement("""
-                        SELECT COUNT(se.id) AS enrolled, e.max_students
-                        FROM exams e
-                        LEFT JOIN student_exams se ON e.id = se.exam_id
-                        WHERE e.id = ?
-                        GROUP BY e.max_students
-                        """);
-                limitCheck.setInt(1, examId);
-                ResultSet rsLimit = limitCheck.executeQuery();
-
-                if (rsLimit.next()) {
-                    int enrolled = rsLimit.getInt("enrolled");
-                    int max = rsLimit.getInt("max_students");
-                    if (enrolled >= max) {
-                        JOptionPane.showMessageDialog(this,
-                                "❌ Exam is full! (" + max + " students max)",
-                                "Exam Full",
-                                JOptionPane.WARNING_MESSAGE);
-                        return;
-                    }
-                }
-
                 int confirm = JOptionPane.showConfirmDialog(this,
                         "Pay ₱" + EXAM_FEE + " for " + subject + " exam?\nYour balance: ₱" + balance,
                         "Confirm Enrollment", JOptionPane.YES_NO_OPTION);
@@ -220,30 +292,25 @@ public class ManageExamsPanel extends JPanel {
     private void enrollAndSchedule(int examId, String subject) {
         try {
             conn.setAutoCommit(false);
-
-            // Deduct balance
+            // Deduct fee
             PreparedStatement updBal = conn.prepareStatement("UPDATE students SET balance = balance - ? WHERE id = ?");
             updBal.setDouble(1, EXAM_FEE);
             updBal.setInt(2, studentId);
             updBal.executeUpdate();
-
-            // Enroll student
-            PreparedStatement ins = conn.prepareStatement(
-                    "INSERT INTO student_exams (student_id, exam_id, status, is_paid) VALUES (?, ?, 'Enrolled', 1)",
-                    Statement.RETURN_GENERATED_KEYS);
-            ins.setInt(1, studentId);
-            ins.setInt(2, examId);
-            ins.executeUpdate();
-
-            ResultSet genKeys = ins.getGeneratedKeys();
-            int registrationId = 0;
-            if (genKeys.next())
-                registrationId = genKeys.getInt(1);
-
-            // Assign schedule
-            assignSchedule(registrationId, examId);
-
+            // Use SchedulingService to REUSE or CREATE schedule then enroll (TreeMap +
+            // PriorityQueue inside)
+            SchedulingService.AssignmentResult ar = SchedulingService.scheduleAndEnrollExam(studentId, examId, conn);
+            if (ar == null)
+                throw new SQLException("Scheduling failed");
+            JOptionPane.showMessageDialog(this,
+                    "✅ Enrollment successful!\n\nExam: " + subject +
+                            "\nSession Date: " + ar.date +
+                            "\nStart Time: " + ar.start +
+                            "\nRoom: " + ar.room +
+                            "\nSession ID: " + ar.examScheduleId,
+                    "Exam Scheduled", JOptionPane.INFORMATION_MESSAGE);
             conn.commit();
+            loadExams(); // refresh UI
 
         } catch (SQLException e) {
             try {
@@ -262,129 +329,8 @@ public class ManageExamsPanel extends JPanel {
         }
     }
 
-    private void assignSchedule(int registrationId, int examId) throws SQLException {
-        // 1. Fetch exam metadata
-        LocalDate examDate = null;
-        LocalTime baseTime = LocalTime.of(9, 0);
-        int durationMin = 120;
-        try (PreparedStatement ps = conn
-                .prepareStatement("SELECT exam_date, exam_time, duration FROM exams WHERE id=?")) {
-            ps.setInt(1, examId);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    Date d = rs.getDate("exam_date");
-                    if (d != null)
-                        examDate = d.toLocalDate();
-                    Time t = rs.getTime("exam_time");
-                    if (t != null)
-                        baseTime = t.toLocalTime();
-                    String dur = rs.getString("duration");
-                    if (dur != null)
-                        durationMin = parseDurMinutes(dur);
-                }
-            }
-        }
-        if (examDate == null)
-            examDate = LocalDate.now().plusDays(1);
-        if (baseTime.isBefore(LocalTime.of(8, 0)) || baseTime.isAfter(LocalTime.of(17, 0)))
-            baseTime = LocalTime.of(9, 0);
-
-        // 2. Build occupied intervals for that date
-        class Slot {
-            LocalTime start;
-            LocalTime end;
-            String room;
-
-            Slot(LocalTime s, LocalTime e, String r) {
-                start = s;
-                end = e;
-                room = r;
-            }
-        }
-        java.util.List<Slot> busy = new java.util.ArrayList<Slot>();
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT scheduled_time, room FROM student_exams WHERE scheduled_date=? AND scheduled_time IS NOT NULL AND room IS NOT NULL")) {
-            ps.setDate(1, java.sql.Date.valueOf(examDate));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    Time st = rs.getTime("scheduled_time");
-                    String room = rs.getString("room");
-                    if (st != null && room != null) {
-                        LocalTime s = st.toLocalTime();
-                        busy.add(new Slot(s, s.plusMinutes(durationMin), room));
-                    }
-                }
-            }
-        }
-
-        // 3. Try to find first free slot
-        String[] rooms = { "Main Hall", "Room 101", "Room 102", "Room 103", "Computer Lab 1", "Computer Lab 2" };
-        LocalTime chosenStart = null;
-        String chosenRoom = null;
-        outer: for (LocalTime cur = baseTime; !cur.plusMinutes(durationMin).isAfter(LocalTime.of(17, 0)); cur = cur
-                .plusMinutes(30)) {
-            LocalTime end = cur.plusMinutes(durationMin);
-            for (String room : rooms) {
-                boolean clash = false;
-                for (Slot sl : busy) {
-                    if (!sl.room.equals(room))
-                        continue;
-                    if (cur.isBefore(sl.end) && sl.start.isBefore(end)) {
-                        clash = true;
-                        break;
-                    }
-                }
-                if (!clash) {
-                    chosenStart = cur;
-                    chosenRoom = room;
-                    break outer;
-                }
-            }
-        }
-        if (chosenStart == null) {
-            chosenStart = baseTime;
-            chosenRoom = rooms[0];
-        }
-
-        // 4. Persist schedule (still inside caller's transaction)
-        try (PreparedStatement upd = conn.prepareStatement(
-                "UPDATE student_exams SET scheduled_date=?, scheduled_time=?, room=?, status=CASE WHEN status='Pending' THEN 'Enrolled' ELSE status END WHERE id=?")) {
-            upd.setDate(1, java.sql.Date.valueOf(examDate));
-            upd.setTime(2, java.sql.Time.valueOf(chosenStart));
-            upd.setString(3, chosenRoom);
-            upd.setInt(4, registrationId);
-            upd.executeUpdate();
-        }
-
-        // 5. Confirm to user
-        JOptionPane.showMessageDialog(this,
-                "✅ Enrollment successful!\n\nExam ID: " + examId +
-                        "\nDate: " + examDate +
-                        "\nTime: " + chosenStart +
-                        "\nRoom: " + chosenRoom,
-                "Exam Scheduled", JOptionPane.INFORMATION_MESSAGE);
-    }
-
-    private int parseDurMinutes(String d) {
-        if (d == null)
-            return 120;
-        d = d.toLowerCase();
-        if (d.contains("1.5"))
-            return 90;
-        if (d.contains("2.5"))
-            return 150;
-        if (d.contains("3"))
-            return 180;
-        if (d.contains("2"))
-            return 120;
-        if (d.contains("1"))
-            return 60;
-        try {
-            return Integer.parseInt(d.replaceAll("[^0-9]", ""));
-        } catch (Exception e) {
-            return 120;
-        }
-    }
+    // Removed legacy assignSchedule – logic migrated to
+    // SchedulingService.scheduleAndEnrollExam
 
     private int getSelectedExamId(int visibleRowIndex) {
         int modelIndex = examTable.convertRowIndexToModel(visibleRowIndex);
