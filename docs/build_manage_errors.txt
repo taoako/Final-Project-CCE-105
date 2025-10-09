@@ -1,0 +1,12 @@
+views\ManageExamsPanel.java:3: error: package dao does not exist
+import dao.DatabaseConnection;
+          ^
+views\ManageExamsPanel.java:21: error: cannot find symbol
+        conn = DatabaseConnection.getConnection();
+               ^
+  symbol:   variable DatabaseConnection
+  location: class ManageExamsPanel
+views\ManageExamsPanel.java:324: error: package dao does not exist
+        boolean ok = dao.SchedulingService.smartScheduleStudentExam(registrationId, conn);
+                        ^
+3 errors

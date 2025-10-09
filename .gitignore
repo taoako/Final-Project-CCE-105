@@ -1,0 +1,10 @@
+bin/
+*.class
+*.log
+*.tmp
+*.bak
+/.idea/
+/.vscode/
+*.iml
+*.DS_Store
+lib/mysql-connector-j-*.jar
