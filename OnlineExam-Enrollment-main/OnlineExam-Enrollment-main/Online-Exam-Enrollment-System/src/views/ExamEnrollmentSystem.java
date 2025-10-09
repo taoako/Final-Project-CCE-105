@@ -40,6 +40,12 @@ public class ExamEnrollmentSystem extends JFrame {
     private JTable tblManageExams;
     private CardLayout cardLayout;
 
+    // Stats card labels for real-time updates
+    private JLabel balanceValueLabel;
+    private JLabel enrolledValueLabel;
+    private JLabel completedValueLabel;
+    private JLabel pendingValueLabel;
+
     private static final int EXAM_FEE = 300; // Default exam fee
 
     public ExamEnrollmentSystem(int studentId) {
@@ -108,7 +114,6 @@ public class ExamEnrollmentSystem extends JFrame {
         addNavigationButton(sidebar, "📊 Dashboard", "dashboard", true);
         addNavigationButton(sidebar, "📝 My Exams", "myexams", false);
         addNavigationButton(sidebar, "📋 Manage Exams", "manage", false);
-        addNavigationButton(sidebar, "📈 My Marks", "marks", false);
 
         sidebar.add(Box.createVerticalGlue());
 
@@ -242,7 +247,6 @@ public class ExamEnrollmentSystem extends JFrame {
                 case "dashboard" -> showDashboardView();
                 case "myexams" -> showMyExamsView();
                 case "manage" -> showManageView();
-                case "marks" -> showMyMarksView();
             }
         });
 
@@ -320,7 +324,6 @@ public class ExamEnrollmentSystem extends JFrame {
         mainContent.add(createDashboardPanel(), "dashboard");
         mainContent.add(createMyExamsPanel(), "myexams");
         mainContent.add(new ManageExamsPanel(studentId), "manage");
-        mainContent.add(createMyMarksPanel(), "marks");
 
         add(mainContent, BorderLayout.CENTER);
     }
@@ -379,16 +382,16 @@ public class ExamEnrollmentSystem extends JFrame {
         JPanel panel = new JPanel(new GridLayout(1, 4, 20, 0));
         panel.setBackground(LIGHT_COLOR);
 
-        // These will be populated with actual data
-        panel.add(createStatsCard("💰 Balance", "₱0.00", "Current wallet balance", SUCCESS_COLOR));
-        panel.add(createStatsCard("📝 Enrolled", "0", "Active exam enrollments", ACCENT_COLOR));
-        panel.add(createStatsCard("✅ Completed", "0", "Exams completed", SUCCESS_COLOR));
-        panel.add(createStatsCard("⏳ Pending", "0", "Awaiting payment", WARNING_COLOR));
+        // Create stats cards with real data references
+        panel.add(createStatsCard("💰 Balance", "₱0.00", "Current wallet balance", SUCCESS_COLOR, "balance"));
+        panel.add(createStatsCard("📝 Enrolled", "0", "Active exam enrollments", ACCENT_COLOR, "enrolled"));
+        panel.add(createStatsCard("✅ Completed", "0", "Exams completed", SUCCESS_COLOR, "completed"));
+        panel.add(createStatsCard("⏳ Pending", "0", "Awaiting payment", WARNING_COLOR, "pending"));
 
         return panel;
     }
 
-    private JPanel createStatsCard(String title, String value, String subtitle, Color accentColor) {
+    private JPanel createStatsCard(String title, String value, String subtitle, Color accentColor, String type) {
         JPanel card = new JPanel();
         card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
         card.setBackground(CARD_COLOR);
@@ -409,6 +412,22 @@ public class ExamEnrollmentSystem extends JFrame {
         valueLabel.setFont(new Font("Segoe UI", Font.BOLD, 28));
         valueLabel.setForeground(TEXT_COLOR);
         valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+
+        // Store reference to value label for updates
+        switch (type) {
+            case "balance":
+                balanceValueLabel = valueLabel;
+                break;
+            case "enrolled":
+                enrolledValueLabel = valueLabel;
+                break;
+            case "completed":
+                completedValueLabel = valueLabel;
+                break;
+            case "pending":
+                pendingValueLabel = valueLabel;
+                break;
+        }
 
         topRow.add(iconLabel, BorderLayout.WEST);
         topRow.add(valueLabel, BorderLayout.EAST);
@@ -596,60 +615,97 @@ public class ExamEnrollmentSystem extends JFrame {
         }
     }
 
+    /**
+     * Updates statistics cards with real data from database
+     * Replaces the old updateExamStatistics method with visual updates
+     */
     private void updateStatsCards() {
-        // Update various statistics on the dashboard
-        loadBalance();
-        updateExamStatistics();
-    }
-
-    private void updateExamStatistics() {
         try {
-            // Count enrolled exams
-            int enrolledCount = 0;
-            int completedCount = 0;
-            int pendingCount = 0;
+            // Get student's current balance
+            double balance = getStudentBalance();
 
-            String sql = "SELECT status, COUNT(*) as count FROM student_exams WHERE student_id=? GROUP BY status";
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setInt(1, studentId);
-            ResultSet rs = ps.executeQuery();
+            // Count exams by status - using final variables for lambda access
+            final int[] counts = new int[3]; // [enrolled, completed, pending]
 
-            while (rs.next()) {
-                String status = rs.getString("status");
-                int count = rs.getInt("count");
+            // Enhanced query to properly categorize exam statuses
+            String sql = "SELECT " +
+                    "    SUM(CASE WHEN se.status = 'Enrolled' AND es.scheduled_date >= CURDATE() THEN 1 ELSE 0 END) as enrolled, "
+                    +
+                    "    SUM(CASE WHEN se.status = 'Completed' OR es.scheduled_date < CURDATE() THEN 1 ELSE 0 END) as completed, "
+                    +
+                    "    SUM(CASE WHEN se.is_paid = 0 THEN 1 ELSE 0 END) as pending " +
+                    "FROM student_exams se " +
+                    "JOIN exam_schedules es ON se.exam_schedule_id = es.id " +
+                    "WHERE se.student_id = ?";
 
-                switch (status.toLowerCase()) {
-                    case "enrolled":
-                        enrolledCount = count;
-                        break;
-                    case "completed":
-                        completedCount = count;
-                        break;
-                    case "pending":
-                        pendingCount = count;
-                        break;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, studentId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        counts[0] = rs.getInt("enrolled");
+                        counts[1] = rs.getInt("completed");
+                        counts[2] = rs.getInt("pending");
+                    }
                 }
             }
 
-            // Update stats cards (this would need references to the actual cards)
-            // For now, we'll print the statistics
-            System.out.println("[STATS] Enrolled: " + enrolledCount + ", Completed: " + completedCount + ", Pending: "
-                    + pendingCount);
+            // Update the UI labels with real data
+            SwingUtilities.invokeLater(() -> {
+                if (balanceValueLabel != null) {
+                    balanceValueLabel.setText(String.format("₱%.2f", balance));
+                }
+                if (enrolledValueLabel != null) {
+                    enrolledValueLabel.setText(String.valueOf(counts[0]));
+                }
+                if (completedValueLabel != null) {
+                    completedValueLabel.setText(String.valueOf(counts[1]));
+                }
+                if (pendingValueLabel != null) {
+                    pendingValueLabel.setText(String.valueOf(counts[2]));
+                }
+            });
+
+            // Debug output
+            System.out.printf("[REAL STATS] Balance: ₱%.2f, Enrolled: %d, Completed: %d, Pending: %d%n",
+                    balance, counts[0], counts[1], counts[2]);
 
         } catch (SQLException ex) {
+            System.err.println("Error updating stats: " + ex.getMessage());
             ex.printStackTrace();
         }
     }
 
+    /**
+     * Gets student's current balance from the database
+     */
+    private double getStudentBalance() throws SQLException {
+        String sql = "SELECT balance FROM students WHERE id = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, studentId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getDouble("balance");
+                }
+            }
+        }
+        return 1000.0; // Default balance if not found
+    }
+
+    private void updateExamStatistics() {
+        // Legacy method - now calls the new updateStatsCards method
+        updateStatsCards();
+    }
+
     private void loadUpcomingExams() {
         try {
-            // Updated query to match the new database schema
+            // Updated query to match the proper exam_schedules schema
             String sql = "SELECT se.id AS reg_id, e.id AS exam_id, e.exam_name, "
-                    + "es.scheduled_date, es.scheduled_time, es.room_number, e.duration, "
+                    + "es.scheduled_date, es.scheduled_time, r.room_name, e.duration, "
                     + "se.status, se.is_paid "
                     + "FROM student_exams se "
                     + "JOIN exam_schedules es ON se.exam_schedule_id = es.id "
                     + "JOIN exams e ON es.exam_id = e.id "
+                    + "JOIN rooms r ON r.id = es.room_id "
                     + "WHERE se.student_id=? AND se.status <> 'Cancelled' "
                     + "ORDER BY es.scheduled_date, es.scheduled_time";
             PreparedStatement ps = conn.prepareStatement(sql);
@@ -670,7 +726,7 @@ public class ExamEnrollmentSystem extends JFrame {
                 String examName = rs.getString("exam_name");
                 Date scheduledDate = rs.getDate("scheduled_date");
                 Time scheduledTime = rs.getTime("scheduled_time");
-                String roomNumber = rs.getString("room_number");
+                String roomName = rs.getString("room_name");
                 String duration = rs.getString("duration");
                 String status = rs.getString("status");
                 boolean paid = rs.getInt("is_paid") == 1;
@@ -679,7 +735,7 @@ public class ExamEnrollmentSystem extends JFrame {
                         examName,
                         scheduledDate != null ? scheduledDate.toString() : "TBA",
                         scheduledTime != null ? scheduledTime.toString() : "TBA",
-                        roomNumber != null ? roomNumber : "TBA",
+                        roomName != null ? roomName : "TBA",
                         duration != null ? duration : "TBA",
                         status != null ? status : "Unknown",
                         paid ? "✅ Paid" : "❌ Unpaid"

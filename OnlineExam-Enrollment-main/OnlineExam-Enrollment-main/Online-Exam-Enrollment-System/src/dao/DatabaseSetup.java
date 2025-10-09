@@ -11,6 +11,7 @@ public class DatabaseSetup {
                 createRoomsTable(conn);
                 createExamSchedulesTable(conn);
                 createStudentExamsTable(conn);
+                createPaymentsTable(conn);
                 updateExamsTable(conn);
                 insertSampleData(conn);
                 System.out.println("✅ Database setup completed successfully!");
@@ -95,6 +96,26 @@ public class DatabaseSetup {
         try (Statement stmt = conn.createStatement()) {
             stmt.executeUpdate(sql);
             System.out.println("✅ Student exams table created/verified");
+        }
+    }
+
+    private static void createPaymentsTable(Connection conn) throws SQLException {
+        String sql = """
+                    CREATE TABLE IF NOT EXISTS payments (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        student_id INT NOT NULL,
+                        amount DECIMAL(10,2) NOT NULL,
+                        payment_method VARCHAR(50) NOT NULL,
+                        reference_no VARCHAR(100) NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+                        INDEX idx_payments_student_id (student_id)
+                    )
+                """;
+
+        try (Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate(sql);
+            System.out.println("✅ Payments table created/verified");
         }
     }
 

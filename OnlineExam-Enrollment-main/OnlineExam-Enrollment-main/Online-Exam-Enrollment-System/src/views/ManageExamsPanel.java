@@ -59,7 +59,7 @@ public class ManageExamsPanel extends JPanel {
                 int row = rowAtPoint(e.getPoint());
                 if (row > -1) {
                     int modelRow = convertRowIndexToModel(row);
-                    Object statusObj = getModel().getValueAt(modelRow, 3);
+                    Object statusObj = getModel().getValueAt(modelRow, 2);
                     String status = statusObj != null ? statusObj.toString() : "";
                     switch (status) {
                         case "Available":
@@ -89,7 +89,7 @@ public class ManageExamsPanel extends JPanel {
                 Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
                 if (!isSelected) {
                     int modelRow = table.convertRowIndexToModel(row);
-                    Object statusObj = table.getModel().getValueAt(modelRow, 3);
+                    Object statusObj = table.getModel().getValueAt(modelRow, 2);
                     String status = statusObj != null ? statusObj.toString() : "";
                     switch (status) {
                         case "Available":
@@ -149,35 +149,19 @@ public class ManageExamsPanel extends JPanel {
         // exam_schedules.
         try {
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "Exam ID", "Subject", "Enrolled Today", "Sessions Today", "First Time", "First Room",
-                            "Status" },
-                    0);
+                    new Object[] { "Exam ID", "Subject", "Status" }, 0);
             String sql = "SELECT e.id, e.exam_name AS subject, " +
-                    "(SELECT COUNT(se.id) FROM student_exams se JOIN exam_schedules es2 ON se.exam_schedule_id=es2.id WHERE es2.exam_id=e.id AND es2.scheduled_date=CURDATE()) AS enrolled_today, "
-                    +
-                    "(SELECT COUNT(*) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS sessions_today, "
-                    +
-                    "(SELECT MIN(es.scheduled_time) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS first_time, "
-                    +
-                    "(SELECT es.room_number FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE() ORDER BY es.scheduled_time LIMIT 1) AS first_room, "
-                    +
                     "CASE WHEN EXISTS (SELECT 1 FROM student_exams se JOIN exam_schedules es ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.exam_id=e.id) THEN 'Enrolled' ELSE 'Available' END AS status "
                     +
-                    "FROM exams e JOIN students s ON e.course_id=s.course_id WHERE s.id=? ORDER BY e.id";
+                    "FROM exams e ORDER BY e.id";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setInt(1, studentId);
-                ps.setInt(2, studentId);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         int id = rs.getInt("id");
                         String subject = rs.getString("subject");
-                        int enrolledToday = rs.getInt("enrolled_today");
-                        int sessionsToday = rs.getInt("sessions_today");
-                        Time firstTime = rs.getTime("first_time");
-                        String firstRoom = rs.getString("first_room");
                         String status = rs.getString("status");
-                        model.addRow(new Object[] { id, subject, enrolledToday, sessionsToday, firstTime, firstRoom,
-                                status });
+                        model.addRow(new Object[] { id, subject, status });
                     }
                 }
             }
@@ -196,36 +180,20 @@ public class ManageExamsPanel extends JPanel {
         }
         try {
             DefaultTableModel model = new DefaultTableModel(
-                    new Object[] { "Exam ID", "Subject", "Enrolled Today", "Sessions Today", "First Time", "First Room",
-                            "Status" },
-                    0);
+                    new Object[] { "Exam ID", "Subject", "Status" }, 0);
             String sql = "SELECT e.id, e.exam_name AS subject, " +
-                    "(SELECT COUNT(se.id) FROM student_exams se JOIN exam_schedules es2 ON se.exam_schedule_id=es2.id WHERE es2.exam_id=e.id AND es2.scheduled_date=CURDATE()) AS enrolled_today, "
-                    +
-                    "(SELECT COUNT(*) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS sessions_today, "
-                    +
-                    "(SELECT MIN(es.scheduled_time) FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE()) AS first_time, "
-                    +
-                    "(SELECT es.room_number FROM exam_schedules es WHERE es.exam_id=e.id AND es.scheduled_date=CURDATE() ORDER BY es.scheduled_time LIMIT 1) AS first_room, "
-                    +
                     "CASE WHEN EXISTS (SELECT 1 FROM student_exams se JOIN exam_schedules es ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.exam_id=e.id) THEN 'Enrolled' ELSE 'Available' END AS status "
                     +
-                    "FROM exams e JOIN students s ON e.course_id=s.course_id WHERE s.id=? AND e.exam_name LIKE ? ORDER BY e.id";
+                    "FROM exams e WHERE e.exam_name LIKE ? ORDER BY e.id";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setInt(1, studentId);
-                ps.setInt(2, studentId);
-                ps.setString(3, "%" + keyword + "%");
+                ps.setString(2, "%" + keyword + "%");
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         int id = rs.getInt("id");
                         String subject = rs.getString("subject");
-                        int enrolledToday = rs.getInt("enrolled_today");
-                        int sessionsToday = rs.getInt("sessions_today");
-                        Time firstTime = rs.getTime("first_time");
-                        String firstRoom = rs.getString("first_room");
                         String status = rs.getString("status");
-                        model.addRow(new Object[] { id, subject, enrolledToday, sessionsToday, firstTime, firstRoom,
-                                status });
+                        model.addRow(new Object[] { id, subject, status });
                     }
                 }
             }
@@ -248,7 +216,7 @@ public class ManageExamsPanel extends JPanel {
         DefaultTableModel model = (DefaultTableModel) examTable.getModel();
         int examId = Integer.parseInt(model.getValueAt(modelRow, 0).toString());
         String subject = model.getValueAt(modelRow, 1).toString();
-        String status = model.getValueAt(modelRow, 6).toString();
+        String status = model.getValueAt(modelRow, 2).toString();
 
         if ("Enrolled".equals(status)) {
             JOptionPane.showMessageDialog(this, "⚠️ You are already enrolled in this exam.", "Already Enrolled",
@@ -304,10 +272,10 @@ public class ManageExamsPanel extends JPanel {
                 throw new SQLException("Scheduling failed");
             JOptionPane.showMessageDialog(this,
                     "✅ Enrollment successful!\n\nExam: " + subject +
-                            "\nSession Date: " + ar.date +
+                            "\nScheduled Date: " + ar.date +
                             "\nStart Time: " + ar.start +
                             "\nRoom: " + ar.room +
-                            "\nSession ID: " + ar.examScheduleId,
+                            "\nSchedule ID: " + ar.examScheduleId,
                     "Exam Scheduled", JOptionPane.INFORMATION_MESSAGE);
             conn.commit();
             loadExams(); // refresh UI

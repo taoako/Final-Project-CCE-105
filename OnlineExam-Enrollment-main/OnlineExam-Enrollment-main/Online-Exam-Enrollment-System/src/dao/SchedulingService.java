@@ -10,9 +10,11 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Set;
 
 public final class SchedulingService {
 
@@ -326,15 +328,6 @@ public final class SchedulingService {
         return true;
     }
 
-    /**
-     * Intelligent single-row scheduling using TreeMap + PriorityQueue with room
-     * load balancing.
-     * Uses O(log n) neighbor lookups to detect conflicts quickly.
-     * 
-     * @param studentExamId id of student_exams row
-     * @param externalConn  optional existing connection (not closed if provided)
-     * @return true if scheduled (or already scheduled)
-     */
     public static boolean smartScheduleStudentExam(int studentExamId, Connection externalConn) {
         Connection conn = externalConn;
         boolean created = false;
@@ -474,6 +467,7 @@ public final class SchedulingService {
         public LocalDate date; // scheduled_date
         public LocalTime start; // scheduled_time
         public String room; // room_number
+        public Integer capacity; // optional capacity of the schedule
     }
 
     private static class CandidateSlot {
@@ -487,168 +481,478 @@ public final class SchedulingService {
             throws SQLException {
         if (conn == null)
             throw new SQLException("Connection required");
-        LocalDate today = LocalDate.now();
-        int durationMin = fetchExamDurationMinutes(examId, conn);
 
-        // STEP 1: Try reuse existing schedule (capacity check)
-        Integer reuseId = null;
-        LocalTime reuseStart = null;
-        String reuseRoom = null;
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT es.id, es.room_number, es.scheduled_time, r.capacity, " +
-                        "(SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id=es.id) AS enrolled " +
-                        "FROM exam_schedules es JOIN rooms r ON r.room_name = es.room_number " +
-                        "WHERE es.exam_id=? AND es.scheduled_date=? ORDER BY es.scheduled_time")) {
-            ps.setInt(1, examId);
-            ps.setDate(2, java.sql.Date.valueOf(today));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    int cap = rs.getInt("capacity");
-                    int enrolled = rs.getInt("enrolled");
-                    if (enrolled < cap) {
-                        reuseId = rs.getInt("id");
-                        reuseRoom = rs.getString("room_number");
-                        Time t = rs.getTime("scheduled_time");
-                        if (t != null)
-                            reuseStart = t.toLocalTime();
-                        break;
-                    }
+        // 1. Check if student is already enrolled in this exam
+        try (PreparedStatement checkPs = conn.prepareStatement(
+                "SELECT 1 FROM student_exams se JOIN exam_schedules es ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.exam_id=?")) {
+            checkPs.setInt(1, studentId);
+            checkPs.setInt(2, examId);
+            try (ResultSet rs = checkPs.executeQuery()) {
+                if (rs.next()) {
+                    throw new SQLException("Student is already enrolled in this exam");
                 }
             }
         }
-        int scheduleId;
-        LocalTime start;
-        String room;
-        if (reuseId != null) {
-            scheduleId = reuseId;
-            start = reuseStart != null ? reuseStart : LocalTime.of(9, 0);
-            room = reuseRoom;
+
+        // 2. Get student's existing exam schedule (conflict detection)
+        Set<TimeSlot> studentSchedule = getStudentSchedule(studentId, conn);
+
+        // 3. Get exam duration for conflict calculations
+        int examDurationMinutes = getExamDuration(examId, conn);
+
+        // 4. Try to find a conflict-free existing schedule
+        ConflictFreeSchedule bestSchedule = findConflictFreeSchedule(studentId, examId, studentSchedule,
+                examDurationMinutes, conn);
+
+        Integer scheduleId = null;
+        String scheduleRoom = null;
+        java.sql.Date scheduleDate = null;
+        java.sql.Time scheduleTime = null;
+
+        if (bestSchedule != null) {
+            // Found a conflict-free schedule with available capacity
+            scheduleId = bestSchedule.scheduleId;
+            scheduleRoom = bestSchedule.roomName;
+            scheduleDate = bestSchedule.date;
+            scheduleTime = bestSchedule.time;
         } else {
-            // STEP 2: Build occupancy map (TreeMap per room) + usage counts
-            Map<String, java.util.TreeMap<LocalTime, LocalTime>> roomSchedules = new HashMap<>();
-            Map<String, Integer> usage = new HashMap<>();
-            List<String> rooms = new ArrayList<>();
-            try (PreparedStatement ps = conn.prepareStatement("SELECT room_name, capacity FROM rooms")) {
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String rn = rs.getString(1);
-                        rooms.add(rn);
-                        roomSchedules.put(rn, new java.util.TreeMap<>());
-                        usage.put(rn, 0);
-                    }
-                }
-            }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT es.room_number, es.scheduled_time, e.duration FROM exam_schedules es JOIN exams e ON e.id=es.exam_id WHERE es.scheduled_date=?")) {
-                ps.setDate(1, java.sql.Date.valueOf(today));
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        String rn = rs.getString(1);
-                        Time st = rs.getTime(2);
-                        String dur = rs.getString(3);
-                        int dMin = parseDurationMinutes(dur != null ? dur : "2 hours");
-                        if (rn != null && st != null) {
-                            LocalTime s = st.toLocalTime();
-                            roomSchedules.get(rn).put(s, s.plusMinutes(dMin));
-                            usage.put(rn, usage.get(rn) + 1);
-                        }
-                    }
-                }
-            }
-            // Candidate slot generation (PriorityQueue ordering earliest start then lower
-            // usage)
-            java.util.PriorityQueue<CandidateSlot> pq = new java.util.PriorityQueue<>(Comparator
-                    .comparing((CandidateSlot c) -> c.start)
-                    .thenComparingInt(c -> c.roomUsage)
-                    .thenComparing(c -> c.room));
-            // time slots from table
-            List<LocalTime> starts = new ArrayList<>();
-            try (PreparedStatement ps = conn
-                    .prepareStatement("SELECT start_time FROM time_slots ORDER BY start_time")) {
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        Time t = rs.getTime(1);
-                        if (t != null)
-                            starts.add(t.toLocalTime());
-                    }
-                }
-            }
-            if (starts.isEmpty()) {
-                starts.add(LocalTime.of(9, 0));
-                starts.add(LocalTime.of(11, 0));
-                starts.add(LocalTime.of(13, 0));
-                starts.add(LocalTime.of(15, 0));
-            }
-            for (LocalTime st : starts) {
-                LocalTime end = st.plusMinutes(durationMin);
-                for (String r : rooms) {
-                    java.util.TreeMap<LocalTime, LocalTime> sched = roomSchedules.get(r);
-                    boolean conflict = false;
-                    if (!sched.isEmpty()) {
-                        var before = sched.floorEntry(st);
-                        var after = sched.ceilingEntry(st);
-                        if (before != null && before.getValue().isAfter(st))
-                            conflict = true;
-                        if (!conflict && after != null && end.isAfter(after.getKey()))
-                            conflict = true;
-                    }
-                    if (!conflict) {
-                        CandidateSlot cs = new CandidateSlot();
-                        cs.start = st;
-                        cs.end = end;
-                        cs.room = r;
-                        cs.roomUsage = usage.get(r);
-                        pq.add(cs);
-                    }
-                }
-            }
-            if (pq.isEmpty()) {
-                CandidateSlot cs = new CandidateSlot();
-                cs.start = starts.get(0);
-                cs.end = cs.start.plusMinutes(durationMin);
-                cs.room = rooms.get(0);
-                cs.roomUsage = 0;
-                pq.add(cs);
-            }
-            CandidateSlot chosen = pq.poll();
-            start = chosen.start;
-            room = chosen.room;
-            try (PreparedStatement ins = conn.prepareStatement(
-                    "INSERT INTO exam_schedules (student_id, exam_id, room_number, scheduled_date, scheduled_time) VALUES (?,?,?,?,?)",
-                    PreparedStatement.RETURN_GENERATED_KEYS)) {
-                ins.setInt(1, studentId);
-                ins.setInt(2, examId);
-                ins.setString(3, room);
-                ins.setDate(4, java.sql.Date.valueOf(today));
-                ins.setTime(5, Time.valueOf(start));
-                ins.executeUpdate();
-                try (ResultSet gk = ins.getGeneratedKeys()) {
-                    gk.next();
-                    scheduleId = gk.getInt(1);
-                }
+            // No conflict-free schedule found - create a new one using intelligent
+            // scheduling
+            NewScheduleResult newSchedule = createIntelligentSchedule(studentId, examId, studentSchedule,
+                    examDurationMinutes, conn);
+            if (newSchedule != null) {
+                scheduleId = newSchedule.scheduleId;
+                scheduleRoom = newSchedule.roomName;
+                scheduleDate = newSchedule.date;
+                scheduleTime = newSchedule.time;
             }
         }
-        // STEP 4: Enroll student pointing to schedule (no duplicate enrollment check
-        // here)
+
+        if (scheduleId == null) {
+            throw new SQLException(
+                    "❌ Cannot schedule exam - all time slots conflict with your existing exams. Please contact administrator to resolve scheduling conflicts.");
+        }
+
+        // 5. Enroll student in the found/created schedule
         int registrationId;
-        try (PreparedStatement insSe = conn.prepareStatement(
-                "INSERT INTO student_exams (student_id, exam_schedule_id, status, is_paid) VALUES (?,?, 'Enrolled', 1)",
+        try (PreparedStatement insertPs = conn.prepareStatement(
+                "INSERT INTO student_exams (student_id, exam_schedule_id, status, is_paid) VALUES (?, ?, 'Enrolled', 1)",
                 PreparedStatement.RETURN_GENERATED_KEYS)) {
-            insSe.setInt(1, studentId);
-            insSe.setInt(2, scheduleId);
-            insSe.executeUpdate();
-            try (ResultSet gk = insSe.getGeneratedKeys()) {
+            insertPs.setInt(1, studentId);
+            insertPs.setInt(2, scheduleId);
+            insertPs.executeUpdate();
+
+            try (ResultSet gk = insertPs.getGeneratedKeys()) {
                 gk.next();
                 registrationId = gk.getInt(1);
             }
         }
+
         AssignmentResult ar = new AssignmentResult();
         ar.registrationId = registrationId;
         ar.examScheduleId = scheduleId;
-        ar.date = today;
-        ar.start = start;
-        ar.room = room;
+        ar.date = scheduleDate != null ? scheduleDate.toLocalDate() : LocalDate.now();
+        ar.start = scheduleTime != null ? scheduleTime.toLocalTime() : LocalTime.now();
+        ar.room = scheduleRoom;
+        ar.capacity = -1; // Will be determined by exam_schedules.capacity
         return ar;
+    }
+
+    // ===== CONFLICT RESOLUTION DATA STRUCTURES =====
+
+    /**
+     * TimeSlot represents a time interval for conflict detection
+     * Uses TreeMap internally for efficient interval overlap detection
+     */
+    static class TimeSlot implements Comparable<TimeSlot> {
+        LocalDate date;
+        LocalTime startTime;
+        LocalTime endTime;
+        String examName;
+        String room;
+
+        TimeSlot(LocalDate date, LocalTime start, LocalTime end, String examName, String room) {
+            this.date = date;
+            this.startTime = start;
+            this.endTime = end;
+            this.examName = examName;
+            this.room = room;
+        }
+
+        // Check if this slot overlaps with another
+        boolean overlapsWith(TimeSlot other) {
+            if (!this.date.equals(other.date))
+                return false;
+            return this.startTime.isBefore(other.endTime) && this.endTime.isAfter(other.startTime);
+        }
+
+        @Override
+        public int compareTo(TimeSlot other) {
+            int dateComp = this.date.compareTo(other.date);
+            if (dateComp != 0)
+                return dateComp;
+            return this.startTime.compareTo(other.startTime);
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%s %s-%s (%s in %s)", date, startTime, endTime, examName, room);
+        }
+    }
+
+    /**
+     * ConflictFreeSchedule represents a schedule slot that doesn't conflict with
+     * student's existing exams
+     */
+    static class ConflictFreeSchedule {
+        int scheduleId;
+        String roomName;
+        java.sql.Date date;
+        java.sql.Time time;
+        int availableCapacity;
+        int conflictScore; // Lower is better
+
+        ConflictFreeSchedule(int scheduleId, String roomName, java.sql.Date date, java.sql.Time time,
+                int availableCapacity) {
+            this.scheduleId = scheduleId;
+            this.roomName = roomName;
+            this.date = date;
+            this.time = time;
+            this.availableCapacity = availableCapacity;
+            this.conflictScore = 0;
+        }
+    }
+
+    /**
+     * NewScheduleResult represents a newly created schedule
+     */
+    static class NewScheduleResult {
+        int scheduleId;
+        String roomName;
+        java.sql.Date date;
+        java.sql.Time time;
+
+        NewScheduleResult(int scheduleId, String roomName, java.sql.Date date, java.sql.Time time) {
+            this.scheduleId = scheduleId;
+            this.roomName = roomName;
+            this.date = date;
+            this.time = time;
+        }
+    }
+
+    // ===== CONFLICT DETECTION & RESOLUTION METHODS =====
+
+    /**
+     * Gets all scheduled exams for a student using TreeSet for efficient conflict
+     * detection
+     */
+    private static Set<TimeSlot> getStudentSchedule(int studentId, Connection conn) throws SQLException {
+        Set<TimeSlot> schedule = new HashSet<>();
+
+        String sql = "SELECT es.scheduled_date, es.scheduled_time, e.exam_name, e.duration, r.room_name " +
+                "FROM student_exams se " +
+                "JOIN exam_schedules es ON se.exam_schedule_id = es.id " +
+                "JOIN exams e ON es.exam_id = e.id " +
+                "JOIN rooms r ON es.room_id = r.id " +
+                "WHERE se.student_id = ? AND es.scheduled_date IS NOT NULL";
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, studentId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    LocalDate date = rs.getDate("scheduled_date").toLocalDate();
+                    LocalTime startTime = rs.getTime("scheduled_time").toLocalTime();
+                    String durationStr = rs.getString("duration");
+                    int durationMinutes = parseDurationMinutes(durationStr != null ? durationStr : "2 hours");
+                    LocalTime endTime = startTime.plusMinutes(durationMinutes);
+                    String examName = rs.getString("exam_name");
+                    String roomName = rs.getString("room_name");
+
+                    schedule.add(new TimeSlot(date, startTime, endTime, examName, roomName));
+                }
+            }
+        }
+        return schedule;
+    }
+
+    /**
+     * Gets exam duration in minutes
+     */
+    private static int getExamDuration(int examId, Connection conn) throws SQLException {
+        String sql = "SELECT duration FROM exams WHERE id = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, examId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String durationStr = rs.getString("duration");
+                    return parseDurationMinutes(durationStr != null ? durationStr : "2 hours");
+                }
+            }
+        }
+        return 120; // Default 2 hours
+    }
+
+    /**
+     * Finds a conflict-free existing schedule using PriorityQueue for optimal
+     * selection
+     */
+    private static ConflictFreeSchedule findConflictFreeSchedule(int studentId, int examId,
+            Set<TimeSlot> studentSchedule,
+            int examDurationMinutes, Connection conn) throws SQLException {
+
+        // Priority queue to find best schedule (least enrolled first)
+        PriorityQueue<ConflictFreeSchedule> candidateSchedules = new PriorityQueue<>(
+                Comparator.comparingInt((ConflictFreeSchedule s) -> s.conflictScore)
+                        .thenComparingInt(s -> -s.availableCapacity) // Higher capacity preferred
+        );
+
+        String sql = "SELECT es.id, r.room_name, es.scheduled_date, es.scheduled_time, es.capacity, " +
+                "(SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id = es.id) AS enrolled " +
+                "FROM exam_schedules es " +
+                "JOIN rooms r ON es.room_id = r.id " +
+                "WHERE es.exam_id = ? AND es.capacity > (SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id = es.id)";
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, examId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int scheduleId = rs.getInt("id");
+                    String roomName = rs.getString("room_name");
+                    java.sql.Date scheduleDate = rs.getDate("scheduled_date");
+                    java.sql.Time scheduleTime = rs.getTime("scheduled_time");
+                    int capacity = rs.getInt("capacity");
+                    int enrolled = rs.getInt("enrolled");
+
+                    // Create proposed time slot for this schedule
+                    LocalDate date = scheduleDate.toLocalDate();
+                    LocalTime startTime = scheduleTime.toLocalTime();
+                    LocalTime endTime = startTime.plusMinutes(examDurationMinutes);
+                    TimeSlot proposedSlot = new TimeSlot(date, startTime, endTime, "NEW_EXAM", roomName);
+
+                    // Check for conflicts with student's existing schedule
+                    boolean hasConflict = false;
+                    for (TimeSlot existingSlot : studentSchedule) {
+                        if (proposedSlot.overlapsWith(existingSlot)) {
+                            hasConflict = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasConflict) {
+                        ConflictFreeSchedule candidate = new ConflictFreeSchedule(
+                                scheduleId, roomName, scheduleDate, scheduleTime, capacity - enrolled);
+                        candidate.conflictScore = enrolled; // Lower enrollment = better score
+                        candidateSchedules.offer(candidate);
+                    }
+                }
+            }
+        }
+
+        return candidateSchedules.poll(); // Return best candidate or null
+    }
+
+    /**
+     * Creates a new intelligent schedule using TreeMap for time slot management
+     * Implements sophisticated conflict avoidance algorithm
+     */
+    private static NewScheduleResult createIntelligentSchedule(int studentId, int examId, Set<TimeSlot> studentSchedule,
+            int examDurationMinutes, Connection conn) throws SQLException {
+
+        // TreeMap for organized time slot exploration
+        Map<LocalDate, Set<LocalTime>> availableSlots = new java.util.TreeMap<>();
+
+        // Generate potential dates (next 30 days)
+        LocalDate startDate = LocalDate.now().plusDays(1);
+        for (int i = 0; i < 30; i++) {
+            LocalDate testDate = startDate.plusDays(i);
+            Set<LocalTime> timeSlots = new HashSet<>();
+
+            // Generate time slots from 9 AM to 5 PM
+            for (LocalTime time = LocalTime.of(9, 0); time.plusMinutes(examDurationMinutes)
+                    .isBefore(LocalTime.of(17, 1)); time = time.plusMinutes(30)) {
+                timeSlots.add(time);
+            }
+            availableSlots.put(testDate, timeSlots);
+        }
+
+        // Remove conflicting time slots
+        for (TimeSlot studentSlot : studentSchedule) {
+            Set<LocalTime> daySlots = availableSlots.get(studentSlot.date);
+            if (daySlots != null) {
+                // Remove all slots that would overlap
+                daySlots.removeIf(time -> {
+                    LocalTime endTime = time.plusMinutes(examDurationMinutes);
+                    return time.isBefore(studentSlot.endTime) && endTime.isAfter(studentSlot.startTime);
+                });
+            }
+        }
+
+        // Find best available slot with room
+        for (Map.Entry<LocalDate, Set<LocalTime>> entry : availableSlots.entrySet()) {
+            LocalDate date = entry.getKey();
+            for (LocalTime time : entry.getValue()) {
+                // Find available room for this time slot
+                String availableRoom = findAvailableRoom(date, time, examDurationMinutes, conn);
+                if (availableRoom != null) {
+                    // Create new schedule
+                    int newScheduleId = createNewSchedule(examId, availableRoom, date, time, conn);
+                    if (newScheduleId > 0) {
+                        return new NewScheduleResult(
+                                newScheduleId,
+                                availableRoom,
+                                java.sql.Date.valueOf(date),
+                                java.sql.Time.valueOf(time));
+                    }
+                }
+            }
+        }
+
+        return null; // No available slot found
+    }
+
+    /**
+     * Finds an available room for a specific date and time
+     */
+    private static String findAvailableRoom(LocalDate date, LocalTime time, int durationMinutes, Connection conn)
+            throws SQLException {
+        // Check each room for availability
+        for (String room : ROOMS) {
+            if (isRoomAvailable(room, date, time, durationMinutes, conn)) {
+                return room;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Checks if a room is available for a specific time period
+     */
+    private static boolean isRoomAvailable(String roomName, LocalDate date, LocalTime startTime, int durationMinutes,
+            Connection conn) throws SQLException {
+        LocalTime endTime = startTime.plusMinutes(durationMinutes);
+
+        String sql = "SELECT COUNT(*) FROM exam_schedules es " +
+                "JOIN rooms r ON es.room_id = r.id " +
+                "WHERE r.room_name = ? AND es.scheduled_date = ? " +
+                "AND ((es.scheduled_time < ? AND DATE_ADD(es.scheduled_time, INTERVAL (SELECT COALESCE(NULLIF(SUBSTRING_INDEX(e.duration, ' ', 1), ''), '120') FROM exams e WHERE e.id = es.exam_id) MINUTE) > ?) "
+                +
+                "OR (es.scheduled_time < ? AND es.scheduled_time >= ?))";
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, roomName);
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            ps.setTime(3, java.sql.Time.valueOf(endTime));
+            ps.setTime(4, java.sql.Time.valueOf(startTime));
+            ps.setTime(5, java.sql.Time.valueOf(endTime));
+            ps.setTime(6, java.sql.Time.valueOf(startTime));
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1) == 0; // Available if no conflicts
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Creates a new exam schedule in the database
+     */
+    private static int createNewSchedule(int examId, String roomName, LocalDate date, LocalTime time, Connection conn)
+            throws SQLException {
+        // Get room ID
+        int roomId = 0;
+        String getRoomIdSql = "SELECT id FROM rooms WHERE room_name = ?";
+        try (PreparedStatement ps = conn.prepareStatement(getRoomIdSql)) {
+            ps.setString(1, roomName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    roomId = rs.getInt("id");
+                }
+            }
+        }
+
+        if (roomId == 0) {
+            throw new SQLException("Room not found: " + roomName);
+        }
+
+        // Insert new schedule
+        String insertSql = "INSERT INTO exam_schedules (exam_id, room_id, scheduled_date, scheduled_time, capacity) VALUES (?, ?, ?, ?, ?)";
+        try (PreparedStatement ps = conn.prepareStatement(insertSql, PreparedStatement.RETURN_GENERATED_KEYS)) {
+            ps.setInt(1, examId);
+            ps.setInt(2, roomId);
+            ps.setDate(3, java.sql.Date.valueOf(date));
+            ps.setTime(4, java.sql.Time.valueOf(time));
+            ps.setInt(5, 30); // Default capacity
+
+            ps.executeUpdate();
+            try (ResultSet gk = ps.getGeneratedKeys()) {
+                if (gk.next()) {
+                    return gk.getInt(1);
+                }
+            }
+        }
+        return 0;
+    }
+
+    // ---- Capacity column support helpers ----
+    // Note: Database now has capacity column built-in, these are legacy methods
+    private static boolean capacityCheckDone = false;
+    private static boolean hasCapacityColumn = true; // Always true now
+
+    private static synchronized void ensureCapacityColumnIfNeeded(Connection conn) {
+        // No-op: capacity column is guaranteed to exist in aligned schema
+        capacityCheckDone = true;
+        hasCapacityColumn = true;
+    }
+
+    private static boolean studentHasSlot(int studentId, LocalDate date, int slotId, Connection conn)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT 1 FROM exam_schedules es JOIN student_exams se ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.scheduled_date=? AND es.time_slot_id=? LIMIT 1")) {
+            ps.setInt(1, studentId);
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            ps.setInt(3, slotId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static String pickAvailableRoom(LocalDate date, int slotId, LocalTime start, int durationMin,
+            Connection conn)
+            throws SQLException {
+        // Rooms already occupied in this slot/date
+        Map<String, Boolean> occupied = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT r.room_name FROM exam_schedules es JOIN rooms r ON r.id=es.room_id WHERE es.scheduled_date=?")) {
+            ps.setDate(1, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    occupied.put(rs.getString(1), true);
+                }
+            }
+        }
+        // Choose a room not yet used this slot; prefer lowest current usage that day
+        String chosen = null;
+        int bestUsage = Integer.MAX_VALUE;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT r.room_name, (SELECT COUNT(*) FROM exam_schedules es WHERE es.room_id=r.id AND es.scheduled_date=?) AS usage_count FROM rooms r ORDER BY r.capacity DESC")) {
+            ps.setDate(1, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String rn = rs.getString(1);
+                    int usage = rs.getInt(2);
+                    if (occupied.containsKey(rn))
+                        continue;
+                    if (usage < bestUsage) {
+                        bestUsage = usage;
+                        chosen = rn;
+                    }
+                }
+            }
+        }
+        return chosen; // null if none free
     }
 
     private static int fetchExamDurationMinutes(int examId, Connection conn) throws SQLException {
@@ -683,5 +987,410 @@ public final class SchedulingService {
         } catch (Exception ignored) {
         }
         return 120;
+    }
+
+    // Helper methods for aligned database schema
+    private static boolean studentHasSlotAligned(int studentId, LocalDate date, int slotId, Connection conn)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT 1 FROM exam_schedules es JOIN student_exams se ON se.exam_schedule_id=es.id " +
+                        "WHERE se.student_id=? AND es.scheduled_date=? LIMIT 1")) {
+            ps.setInt(1, studentId);
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static class RoomInfo {
+        int id;
+        String name;
+        int capacity;
+    }
+
+    private static RoomInfo pickAvailableRoomAligned(LocalDate date, int slotId, Connection conn)
+            throws SQLException {
+        // Get rooms not yet used in this specific time slot on this date
+        Set<Integer> occupiedRoomIds = new HashSet<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT DISTINCT room_id FROM exam_schedules WHERE scheduled_date=?")) {
+            ps.setDate(1, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    occupiedRoomIds.add(rs.getInt("room_id"));
+                }
+            }
+        }
+
+        // Choose available room with lowest usage count for the day
+        RoomInfo chosen = null;
+        int bestUsage = Integer.MAX_VALUE;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT r.id, r.room_name, r.capacity, " +
+                        "(SELECT COUNT(*) FROM exam_schedules es WHERE es.room_id=r.id AND es.scheduled_date=?) AS usage_count "
+                        +
+                        "FROM rooms r ORDER BY r.capacity DESC")) {
+            ps.setDate(1, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int roomId = rs.getInt("id");
+                    if (occupiedRoomIds.contains(roomId))
+                        continue; // room already used in some slot this day
+
+                    int usage = rs.getInt("usage_count");
+                    if (usage < bestUsage) {
+                        bestUsage = usage;
+                        chosen = new RoomInfo();
+                        chosen.id = roomId;
+                        chosen.name = rs.getString("room_name");
+                        chosen.capacity = rs.getInt("capacity");
+                    }
+                }
+            }
+        }
+        return chosen; // null if none free
+    }
+
+    // ==============================================================
+    // ADVANCED TESTING-CENTER SCHEDULER (FAIR / LOAD-BALANCED VERSION)
+    // ==============================================================
+    // This method is an alternative to scheduleAndEnrollExam focused on:
+    // - Reusing existing schedules until capacity is reached
+    // - Balancing room usage (fewest occupied slots first)
+    // - Preventing overlapping sessions for the same student per day
+    // - Using TreeMap<LocalTime, LocalTime> per room (fast neighbor conflict check)
+    // - Searching forward day-by-day up to a horizon (default 30 days)
+    // - Respecting time_slots table; if empty, falls back to 4 canonical slots
+    // - Minimal new schedule creation – only when no capacity remains
+    // - Capacity comes from exam_schedules.capacity (if column) else rooms.capacity
+    // Call this instead of scheduleAndEnrollExam if you want the newer strategy.
+    public static AssignmentResult scheduleExamTestingCenter(int studentId, int examId, Connection external)
+            throws SQLException {
+        boolean created = false;
+        Connection conn = external;
+        if (conn == null) {
+            conn = DatabaseConnection.getConnection();
+            created = true;
+        }
+        try {
+            if (conn == null)
+                throw new SQLException("No connection");
+            ensureCapacityColumnIfNeeded(conn);
+            int durationMin = fetchExamDurationMinutes(examId, conn);
+            List<TimeSlotDef> slots = loadTimeSlots(conn);
+            LocalDate today = LocalDate.now();
+            int horizonDays = 30;
+
+            for (int offset = 0; offset < horizonDays; offset++) {
+                LocalDate date = today.plusDays(offset);
+                // Skip date if student already has all slots occupied (quick check)
+                if (studentFullyBookedAllSlots(studentId, date, conn, slots))
+                    continue;
+
+                // Build room usage + schedules for that date using TreeMaps for conflicts
+                Map<String, java.util.TreeMap<LocalTime, LocalTime>> roomMaps = new HashMap<>();
+                Map<String, Integer> roomUsage = new HashMap<>();
+                List<String> rooms = loadRooms(conn);
+                for (String r : rooms) {
+                    roomMaps.put(r, new java.util.TreeMap<>());
+                    roomUsage.put(r, 0);
+                }
+
+                // Load existing schedules for the day
+                try (PreparedStatement ps = conn.prepareStatement(
+                        hasCapacityColumn
+                                ? "SELECT es.id, es.exam_id, es.room_number, es.scheduled_time, COALESCE(es.capacity, r.capacity) AS capacity, (SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id=es.id) AS enrolled, es.time_slot_id FROM exam_schedules es JOIN rooms r ON r.room_name=es.room_number WHERE es.scheduled_date=?"
+                                : "SELECT es.id, es.exam_id, es.room_number, es.scheduled_time, r.capacity AS capacity, (SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id=es.id) AS enrolled, es.time_slot_id FROM exam_schedules es JOIN rooms r ON r.room_name=es.room_number WHERE es.scheduled_date=?")) {
+                    ps.setDate(1, java.sql.Date.valueOf(date));
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String room = rs.getString("room_number");
+                            Time st = rs.getTime("scheduled_time");
+                            if (room != null && st != null) {
+                                LocalTime start = st.toLocalTime();
+                                roomMaps.get(room).put(start, start.plusMinutes(durationMin));
+                                roomUsage.put(room, roomUsage.get(room) + 1);
+                            }
+                        }
+                    }
+                }
+
+                for (TimeSlotDef slot : slots) {
+                    // Skip if student already has exam in this slot/date
+                    if (studentHasSlot(studentId, date, slot.id, conn))
+                        continue;
+
+                    // 1. Try to reuse an existing schedule for SAME exam & slot with free capacity
+                    Integer reuseScheduleId = null;
+                    String reuseRoom = null;
+                    Integer reuseCapacity = null;
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            hasCapacityColumn
+                                    ? "SELECT es.id, es.room_number, COALESCE(es.capacity, r.capacity) AS capacity, (SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id=es.id) AS enrolled FROM exam_schedules es JOIN rooms r ON r.room_name=es.room_number WHERE es.exam_id=? AND es.scheduled_date=? AND es.time_slot_id=? ORDER BY enrolled ASC"
+                                    : "SELECT es.id, es.room_number, r.capacity AS capacity, (SELECT COUNT(*) FROM student_exams se WHERE se.exam_schedule_id=es.id) AS enrolled FROM exam_schedules es JOIN rooms r ON r.room_name=es.room_number WHERE es.exam_id=? AND es.scheduled_date=? AND es.time_slot_id=? ORDER BY enrolled ASC")) {
+                        ps.setInt(1, examId);
+                        ps.setDate(2, java.sql.Date.valueOf(date));
+                        ps.setInt(3, slot.id);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) {
+                                int cap = rs.getInt("capacity");
+                                int enrolled = rs.getInt("enrolled");
+                                if (enrolled < cap) {
+                                    reuseScheduleId = rs.getInt("id");
+                                    reuseRoom = rs.getString("room_number");
+                                    reuseCapacity = cap;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (reuseScheduleId != null) {
+                        // Enroll directly WITHOUT changing any schedule fields
+                        // Read the actual schedule date/time from DB to avoid any mismatch
+                        LocalDate actualDate = date;
+                        LocalTime actualTime = slot.start;
+                        try (PreparedStatement ps2 = conn.prepareStatement(
+                                "SELECT scheduled_date, scheduled_time FROM exam_schedules WHERE id=?")) {
+                            ps2.setInt(1, reuseScheduleId);
+                            try (ResultSet rs2 = ps2.executeQuery()) {
+                                if (rs2.next()) {
+                                    java.sql.Date d = rs2.getDate("scheduled_date");
+                                    java.sql.Time t = rs2.getTime("scheduled_time");
+                                    if (d != null)
+                                        actualDate = d.toLocalDate();
+                                    if (t != null)
+                                        actualTime = t.toLocalTime();
+                                }
+                            }
+                        }
+
+                        int regId = enrollStudentIntoSchedule(studentId, reuseScheduleId, conn);
+                        AssignmentResult ar = new AssignmentResult();
+                        ar.registrationId = regId;
+                        ar.examScheduleId = reuseScheduleId;
+                        ar.date = actualDate;
+                        ar.start = actualTime;
+                        ar.room = reuseRoom;
+                        ar.capacity = reuseCapacity;
+                        return ar;
+                    }
+
+                    // 2. Create a new schedule if a room is free at this slot
+                    LocalTime desiredStart = slot.start;
+                    // Choose best room = conflict-free & lowest current usage
+                    String bestRoom = null;
+                    int bestLoad = Integer.MAX_VALUE;
+                    for (String room : rooms) {
+                        java.util.TreeMap<LocalTime, LocalTime> map = roomMaps.get(room);
+                        if (conflict(map, desiredStart, desiredStart.plusMinutes(durationMin)))
+                            continue;
+                        int load = roomUsage.get(room);
+                        if (load < bestLoad) {
+                            bestLoad = load;
+                            bestRoom = room;
+                        }
+                    }
+                    if (bestRoom == null)
+                        continue; // all rooms busy at this slot -> next slot
+
+                    // Determine capacity from room
+                    int cap = fetchRoomCapacity(bestRoom, conn);
+                    Integer newScheduleId;
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            hasCapacityColumn
+                                    ? "INSERT INTO exam_schedules (student_id, exam_id, room_number, scheduled_date, scheduled_time, time_slot_id, capacity) VALUES (?,?,?,?,?,?,?)"
+                                    : "INSERT INTO exam_schedules (student_id, exam_id, room_number, scheduled_date, scheduled_time, time_slot_id) VALUES (?,?,?,?,?,?)",
+                            PreparedStatement.RETURN_GENERATED_KEYS)) {
+                        ins.setInt(1, studentId); // creator
+                        ins.setInt(2, examId);
+                        ins.setString(3, bestRoom);
+                        ins.setDate(4, java.sql.Date.valueOf(date));
+                        ins.setTime(5, Time.valueOf(desiredStart));
+                        ins.setInt(6, slot.id);
+                        if (hasCapacityColumn)
+                            ins.setInt(7, cap);
+                        ins.executeUpdate();
+                        try (ResultSet gk = ins.getGeneratedKeys()) {
+                            gk.next();
+                            newScheduleId = gk.getInt(1);
+                        }
+                    }
+                    // Update structures for fairness if more scheduling happens same invocation
+                    roomMaps.get(bestRoom).put(desiredStart, desiredStart.plusMinutes(durationMin));
+                    roomUsage.put(bestRoom, roomUsage.get(bestRoom) + 1);
+
+                    // Enroll (creator may or may not already be implicitly enrolled; we keep
+                    // explicit)
+                    int regId = enrollStudentIntoSchedule(studentId, newScheduleId, conn);
+                    AssignmentResult ar = new AssignmentResult();
+                    ar.registrationId = regId;
+                    ar.examScheduleId = newScheduleId;
+                    ar.date = date;
+                    ar.start = desiredStart;
+                    ar.room = bestRoom;
+                    ar.capacity = cap;
+                    return ar;
+                }
+            }
+            throw new SQLException("No capacity available in the next " + horizonDays + " days");
+        } finally {
+            if (created && conn != null) {
+                try {
+                    conn.close();
+                } catch (SQLException ignored) {
+                }
+            }
+        }
+    }
+
+    // ---------- Helpers for advanced scheduler ----------
+    private static boolean conflict(java.util.TreeMap<LocalTime, LocalTime> sched, LocalTime start, LocalTime end) {
+        var before = sched.floorEntry(start);
+        if (before != null && before.getValue().isAfter(start))
+            return true;
+        var after = sched.ceilingEntry(start);
+        if (after != null && end.isAfter(after.getKey()))
+            return true;
+        return false;
+    }
+
+    private static int enrollStudentIntoSchedule(int studentId, int scheduleId, Connection conn) throws SQLException {
+        try (PreparedStatement insSe = conn.prepareStatement(
+                "INSERT INTO student_exams (student_id, exam_schedule_id, status, is_paid) VALUES (?,?, 'Enrolled', 1)",
+                PreparedStatement.RETURN_GENERATED_KEYS)) {
+            insSe.setInt(1, studentId);
+            insSe.setInt(2, scheduleId);
+            insSe.executeUpdate();
+            try (ResultSet gk = insSe.getGeneratedKeys()) {
+                gk.next();
+                int registrationId = gk.getInt(1);
+
+                // Manually decrease capacity since trigger doesn't exist
+                try (PreparedStatement updateCap = conn.prepareStatement(
+                        "UPDATE exam_schedules SET capacity = capacity - 1 WHERE id = ? AND capacity > 0")) {
+                    updateCap.setInt(1, scheduleId);
+                    updateCap.executeUpdate();
+                }
+
+                return registrationId;
+            }
+        }
+    }
+
+    private static int fetchRoomCapacity(String roomName, Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT capacity FROM rooms WHERE room_name=?")) {
+            ps.setString(1, roomName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next())
+                    return rs.getInt(1);
+            }
+        }
+        return 0;
+    }
+
+    private static boolean studentFullyBookedAllSlots(int studentId, LocalDate date, Connection conn,
+            List<TimeSlotDef> slots)
+            throws SQLException {
+        // Quick heuristic: count distinct time_slot_id for that date for student
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT COUNT(DISTINCT es.time_slot_id) FROM exam_schedules es JOIN student_exams se ON se.exam_schedule_id=es.id WHERE se.student_id=? AND es.scheduled_date=?")) {
+            ps.setInt(1, studentId);
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    int count = rs.getInt(1);
+                    // If slots table empty we treat 4 default; else number of actual slots
+                    int totalSlots = slots.isEmpty() ? 4 : slots.size();
+                    return count >= totalSlots;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Structure for loaded time slots
+    private static class TimeSlotDef {
+        int id;
+        LocalTime start;
+        LocalTime end;
+    }
+
+    private static List<TimeSlotDef> loadTimeSlots(Connection conn) throws SQLException {
+        List<TimeSlotDef> list = new ArrayList<>();
+        try (PreparedStatement ps = conn
+                .prepareStatement("SELECT id, start_time FROM time_slots ORDER BY start_time")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Time st = rs.getTime("start_time");
+                    if (st != null) {
+                        TimeSlotDef def = new TimeSlotDef();
+                        def.id = rs.getInt("id");
+                        def.start = st.toLocalTime();
+                        def.end = def.start.plusHours(2); // Default 2-hour slots
+                        list.add(def);
+                    }
+                }
+            }
+        }
+        if (list.isEmpty()) {
+            // fallback canonical 4 slots (2h windows)
+            for (int i = 0; i < 4; i++) {
+                TimeSlotDef def = new TimeSlotDef();
+                def.id = i + 1;
+                def.start = LocalTime.of(9, 0).plusHours(2 * i);
+                def.end = def.start.plusHours(2);
+                list.add(def);
+            }
+        }
+        return list;
+    }
+
+    private static List<String> loadRooms(Connection conn) throws SQLException {
+        List<String> rooms = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT room_name FROM rooms ORDER BY capacity DESC")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    rooms.add(rs.getString(1));
+                }
+            }
+        }
+        if (rooms.isEmpty()) {
+            // fallback to constant list
+            for (String r : ROOMS)
+                rooms.add(r);
+        }
+        return rooms;
+    }
+
+    private static boolean studentFullyBookedAllSlotsAligned(int studentId, LocalDate date, Connection conn)
+            throws SQLException {
+        // Check if student has any exam on this date
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT 1 FROM exam_schedules es JOIN student_exams se ON se.exam_schedule_id=es.id " +
+                        "WHERE se.student_id=? AND es.scheduled_date=? LIMIT 1")) {
+            ps.setInt(1, studentId);
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next(); // if student has any exam this date, consider fully booked
+            }
+        }
+    }
+
+    private static List<RoomInfo> loadRoomsAligned(Connection conn) throws SQLException {
+        List<RoomInfo> rooms = new ArrayList<>();
+        try (PreparedStatement ps = conn
+                .prepareStatement("SELECT id, room_name, capacity FROM rooms ORDER BY capacity DESC")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    RoomInfo room = new RoomInfo();
+                    room.id = rs.getInt("id");
+                    room.name = rs.getString("room_name");
+                    room.capacity = rs.getInt("capacity");
+                    rooms.add(room);
+                }
+            }
+        }
+        return rooms;
     }
 }
